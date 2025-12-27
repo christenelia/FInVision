@@ -1,0 +1,2178 @@
+import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { 
+  TrendingUp, 
+  TrendingDown, 
+  PieChart, 
+  Copy, 
+  Trash2, 
+  ChevronDown, 
+  ChevronUp,
+  Plus,
+  X,
+  Wallet,
+  Repeat,
+  Check,
+  Edit2,
+  Target,
+  Flag,
+  Calendar,
+  Percent,
+  Calculator,
+  ArrowRightCircle,
+  AlertTriangle,
+  CheckCircle2,
+  Hourglass,
+  Briefcase,
+  RefreshCw,
+  Lock,
+  Unlock,
+  ZoomIn,
+  ZoomOut,
+  MoveHorizontal,
+  Save,
+  Layers,
+  Sparkles,
+  MessageSquare,
+  Download,
+  Upload,
+  FileText,
+  Send,
+  Bot,
+  History,
+  AlertOctagon,
+  ShieldCheck,
+  Zap
+} from 'lucide-react';
+
+/**
+ * GEMINI API HELPER (Standard Text)
+ */
+const callGemini = async (prompt, systemInstruction = "") => {
+  const apiKey = ""; // Injected by environment
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          systemInstruction: { parts: [{ text: systemInstruction }] }
+        }),
+      }
+    );
+    if (!response.ok) throw new Error("Gemini API Error");
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response from AI.";
+  } catch (e) {
+    console.error(e);
+    return "Unable to connect to AI Advisor. Please try again.";
+  }
+};
+
+/**
+ * GEMINI API HELPER (JSON Agent Mode)
+ */
+const callGeminiAgent = async (history, contextData) => {
+  const apiKey = ""; 
+  
+  const systemInstruction = `You are FinVision AI, an interactive financial advisor trained on Brent Kessel's book "It's Not About the Money".
+  
+  YOUR GOAL: Help the user achieve "Spiritual and Financial Abundance" (The Middle Way).
+  
+  CAPABILITIES:
+  You can chat with the user and EXECUTE ACTIONS to modify their financial plan.
+  ALWAYS return your response as a valid JSON object.
+  
+  JSON RESPONSE FORMAT:
+  {
+    "thought": "Internal reasoning about the user's request and data...",
+    "message": "The message to display to the user (use Markdown for bolding/lists). Be warm and wise.",
+    "actions": [ ... list of actions to take ... ]
+  }
+
+  AVAILABLE ACTIONS:
+  1. CREATE_PLAN: { "type": "CREATE_PLAN", "name": "Name of new plan" } -> Always do this first if making major changes so we don't overwrite the user's original data.
+  2. ADD_EXPENSE: { "type": "ADD_EXPENSE", "name": "Category Name", "amount": 100 } -> Adds to Global Monthly Expenses.
+  3. UPDATE_EXPENSE: { "type": "UPDATE_EXPENSE", "id": "id_from_context", "amount": 200 } -> Updates existing expense.
+  4. ADD_GOAL: { "type": "ADD_GOAL", "name": "Goal Name", "target": 10000, "allocation": 500, "deadlineMonth": 12 }
+  5. UPDATE_GOAL: { "type": "UPDATE_GOAL", "id": "id_from_context", "target": 20000, "allocation": 1000 }
+  
+  PHILOSOPHY (THE MIDDLE WAY):
+  - Guardian: Needs safety. Suggest "Safety Net" funds.
+  - Pleasure Seeker: Needs limits but also joy. Suggest "Fun Money" allowance (expense).
+  - Saver: Needs to live. Suggest "Loving Life" fund.
+  - Empire Builder: Needs balance. Suggest "Enough for Life" bucket.
+  
+  CURRENT CONTEXT:
+  ${JSON.stringify(contextData)}
+  `;
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: history,
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          generationConfig: { responseMimeType: "application/json" }
+        }),
+      }
+    );
+    if (!response.ok) throw new Error("Agent Error");
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    return JSON.parse(text);
+  } catch (e) {
+    console.error("Agent Parse Error", e);
+    return { message: "I'm having trouble processing that request. Please try again.", actions: [] };
+  }
+};
+
+
+/**
+ * UTILITIES & CONFIG
+ */
+
+// Generate next 24 months for longer term planning
+const generateInitialMonths = (count = 24) => {
+  const months = [];
+  const today = new Date();
+  for (let i = 0; i < count; i++) {
+    const d = new Date(today.getFullYear(), today.getMonth() + i, 1);
+    months.push({
+      id: `m-${i}`,
+      index: i,
+      date: d,
+      name: d.toLocaleString('de-CH', { month: 'short', year: '2-digit' }),
+      fullName: d.toLocaleString('de-CH', { month: 'long', year: 'numeric' }),
+      specificIncomes: [], 
+      specificExpenses: [], 
+      specificGoalContributions: [],
+      isActual: false,
+      actualIncome: 0,
+      actualExpense: 0,
+      actualMainBalance: 0,
+      actualGoalBalances: {}, 
+      globalOverrides: {} 
+    });
+  }
+  return months;
+};
+
+const uid = () => Math.random().toString(36).substr(2, 9);
+
+const defaultScenarios = [
+  {
+    id: 'sc-1',
+    name: 'Standard Plan',
+    civilService: {
+      active: false,
+      startMonthIndex: 6,
+      durationMonths: 3
+    },
+    globalIncomes: [
+      { id: uid(), name: 'Base Salary', amount: 6500 }
+    ],
+    globalExpenses: [
+      { id: uid(), name: 'Rent', amount: 2200 },
+      { id: uid(), name: 'Groceries', amount: 600 }
+    ],
+    recurringIncomes: [],
+    recurringExpenses: [
+      { 
+        id: uid(), 
+        name: 'Gym Membership', 
+        amount: 80, 
+        frequency: 'months', 
+        interval: 1, 
+        startMonthIndex: 0,
+        endMonthIndex: null 
+      }
+    ],
+    recurringGoalContributions: [], 
+    savingsGoals: [
+      {
+        id: uid(),
+        name: 'Emergency Fund',
+        targetType: 'multiplier', 
+        targetValue: 3, 
+        deadlineMonthIndex: 7, 
+        allocationType: 'fixed', 
+        allocationValue: 500,
+        currentBalance: 2000,
+        autoAdjust: true,
+        continueAfterGoal: false,
+        priority: 1,
+        forceAllocation: true
+      },
+      {
+        id: uid(),
+        name: 'Tax Reserve',
+        targetType: 'percent', 
+        targetValue: 15,
+        deadlineMonthIndex: 11, 
+        allocationType: 'percent', 
+        allocationValue: 15, 
+        currentBalance: 0,
+        autoAdjust: false,
+        continueAfterGoal: false,
+        priority: 1,
+        forceAllocation: false
+      }
+    ],
+    months: generateInitialMonths(24)
+  }
+];
+
+const formatCHF = (val) => new Intl.NumberFormat('de-CH', { style: 'currency', currency: 'CHF', maximumFractionDigits: 0 }).format(val);
+const sumItems = (items) => items.reduce((acc, item) => acc + (parseFloat(item.amount) || 0), 0);
+
+// Helper to calculate totals with overrides
+const calculateGlobalTotal = (items, overrides = {}) => {
+  return items.reduce((acc, item) => {
+    const amount = overrides[item.id] !== undefined ? parseFloat(overrides[item.id]) : item.amount;
+    return acc + (amount || 0);
+  }, 0);
+};
+
+const calculateRecurringForMonth = (monthIndex, recurringItems) => {
+  return recurringItems.map(item => {
+    if (monthIndex < item.startMonthIndex) return null;
+    if (item.endMonthIndex !== null && monthIndex > item.endMonthIndex) return null;
+
+    const diff = monthIndex - item.startMonthIndex;
+    let applies = false;
+    let computedAmount = item.amount;
+
+    if (item.frequency === 'months') {
+      if (diff % item.interval === 0) applies = true;
+    } else if (item.frequency === 'years') {
+      if (diff % (item.interval * 12) === 0) applies = true;
+    } else if (item.frequency === 'weeks') {
+      applies = true;
+      computedAmount = (item.amount * 52) / 12 / item.interval;
+    } else if (item.frequency === 'days') {
+      applies = true;
+      computedAmount = (item.amount * 365) / 12 / item.interval;
+    }
+
+    return applies ? { ...item, computedAmount } : null;
+  }).filter(Boolean);
+};
+
+/**
+ * COMPONENTS
+ */
+
+// Rename Scenario Modal
+const RenameScenarioModal = ({ currentName, onClose, onSave }) => {
+  const [name, setName] = useState(currentName);
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden">
+        <div className="bg-slate-900 p-4 flex justify-between items-center text-white">
+          <h3 className="font-bold flex items-center gap-2">Rename Plan</h3>
+          <button onClick={onClose}><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-6">
+          <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Plan Name</label>
+          <input 
+            type="text" 
+            value={name} 
+            onChange={(e) => setName(e.target.value)} 
+            className="w-full p-2 border rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+            autoFocus
+          />
+        </div>
+        <div className="p-4 border-t bg-slate-50 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-200 rounded-lg">Cancel</button>
+          <button onClick={() => { onSave(name); onClose(); }} className="px-4 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Data Transfer Modal
+const DataTransferModal = ({ isOpen, onClose, initialMode, scenario, chartData, onImport }) => {
+  const [mode, setMode] = useState(initialMode || 'export-json'); 
+  const [importText, setImportText] = useState('');
+  const [copyStatus, setCopyStatus] = useState('');
+
+  if (!isOpen) return null;
+
+  // Generate Export Content
+  const getJsonContent = () => JSON.stringify([scenario], null, 2); 
+  
+  const getCsvContent = () => {
+    if (!scenario || !chartData.length) return '';
+    const headers = ["Month", "Main Balance", ...scenario.savingsGoals.map(g => g.name)];
+    const rows = chartData.map(d => {
+        const row = [d.fullName, d.mainBalance.toFixed(2)];
+        scenario.savingsGoals.forEach(g => {
+            row.push((d.goalBalances[g.id] || 0).toFixed(2));
+        });
+        return row.join(",");
+    });
+    return headers.join(",") + "\n" + rows.join("\n");
+  };
+
+  const content = mode === 'export-json' ? getJsonContent() : mode === 'export-csv' ? getCsvContent() : '';
+
+  const handleCopy = () => {
+    try {
+        const textarea = document.getElementById('export-textarea');
+        textarea.select();
+        document.execCommand('copy');
+        setCopyStatus('Copied!');
+        setTimeout(() => setCopyStatus(''), 2000);
+    } catch (err) {
+        setCopyStatus('Manual Copy Needed');
+    }
+  };
+
+  const validateAndParse = (text) => {
+    const trimmed = text.trim();
+    if (!trimmed) throw new Error("Empty content");
+
+    if (trimmed.startsWith("{\\rtf") || (trimmed.startsWith("{") && trimmed[1] === '\\') || trimmed.includes("\\ansi\\ansicpg")) {
+        throw new Error("RTF_DETECTED");
+    }
+
+    if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) {
+        throw new Error("NOT_JSON");
+    }
+
+    return JSON.parse(trimmed);
+  };
+
+  const handleImportText = () => {
+    try {
+      const json = validateAndParse(importText);
+      onImport(json);
+      onClose();
+    } catch (e) {
+      if (e.message === "RTF_DETECTED") {
+         alert("Import Error: It looks like you pasted Rich Text (RTF) code.\n\nPlease open your file in a code editor or convert to Plain Text before copying.");
+      } else if (e.message === "NOT_JSON") {
+         alert("Import Error: The text does not look like valid JSON (must start with '[' or '{').");
+      } else {
+         console.error(e);
+         alert(`Invalid JSON format.\n\nError: ${e.message}`);
+      }
+    }
+  };
+  
+  const handleImportFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+        try {
+            const json = validateAndParse(evt.target.result);
+            onImport(json);
+            onClose();
+        } catch (err) {
+            if (err.message === "RTF_DETECTED") {
+                alert("Import Error: The selected file appears to be a Rich Text (RTF) file, not a valid JSON file.\n\nPlease save your data as Plain Text (.json) and try again.");
+            } else {
+                alert("Invalid File Format. Please ensure it is a valid JSON file.");
+            }
+        }
+    };
+    reader.readAsText(file);
+    e.target.value = null; 
+  };
+
+  return (
+     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col h-[70vh]">
+        <div className="bg-slate-900 p-4 flex justify-between items-center text-white">
+          <h3 className="font-bold flex items-center gap-2">
+            <Download className="w-5 h-5 text-indigo-400" /> Data Transfer
+          </h3>
+          <button onClick={onClose}><X className="w-5 h-5" /></button>
+        </div>
+        
+        {/* Tabs */}
+        <div className="flex border-b border-slate-200">
+           <button onClick={() => setMode('export-json')} className={`flex-1 py-3 text-sm font-bold transition-colors ${mode === 'export-json' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-slate-500 hover:bg-slate-50'}`}>Export JSON</button>
+           <button onClick={() => setMode('export-csv')} className={`flex-1 py-3 text-sm font-bold transition-colors ${mode === 'export-csv' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-slate-500 hover:bg-slate-50'}`}>Export CSV</button>
+           <button onClick={() => setMode('import')} className={`flex-1 py-3 text-sm font-bold transition-colors ${mode === 'import' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50' : 'text-slate-500 hover:bg-slate-50'}`}>Import JSON</button>
+        </div>
+
+        <div className="p-6 flex-1 overflow-hidden flex flex-col">
+           {mode === 'import' ? (
+             <div className="flex flex-col h-full gap-4">
+               <div className="flex items-center gap-4 p-4 bg-slate-50 rounded-lg border border-slate-200 border-dashed">
+                 <Upload className="w-6 h-6 text-slate-400"/>
+                 <div className="flex-1">
+                    <div className="text-sm font-bold text-slate-700">Upload File</div>
+                    <div className="text-xs text-slate-500">Select a .json file to restore</div>
+                 </div>
+                 <input type="file" accept=".json" onChange={handleImportFile} className="text-xs" />
+               </div>
+               <div className="text-center text-xs text-slate-400 font-bold uppercase tracking-wider">- OR PASTE TEXT -</div>
+               <textarea 
+                 className="w-full flex-1 p-3 border rounded-lg font-mono text-xs focus:ring-2 focus:ring-indigo-500 outline-none resize-none"
+                 value={importText}
+                 onChange={(e) => setImportText(e.target.value)}
+                 placeholder='Paste your JSON data here...'
+               />
+             </div>
+           ) : (
+             <>
+               <p className="text-sm text-slate-500 mb-2">
+                 {mode === 'export-csv' ? 'Copy this CSV data to paste into Excel/Sheets:' : 'Copy this JSON code to save your entire configuration:'}
+               </p>
+               <textarea 
+                 id="export-textarea"
+                 readOnly
+                 className="w-full flex-1 p-3 border rounded-lg font-mono text-xs bg-slate-50 outline-none resize-none text-slate-600"
+                 value={content}
+               />
+             </>
+           )}
+        </div>
+
+        <div className="p-4 border-t bg-slate-50 flex justify-end gap-2">
+           {mode === 'import' ? (
+             <button onClick={handleImportText} disabled={!importText} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 disabled:opacity-50">Import Text</button>
+           ) : (
+             <button onClick={handleCopy} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 flex items-center gap-2">
+               {copyStatus ? <Check className="w-4 h-4"/> : <Copy className="w-4 h-4"/>}
+               {copyStatus || "Copy to Clipboard"}
+             </button>
+           )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// AI Advisor Modal
+const AIAdvisorModal = ({ onClose, scenario, stats, onAIAction }) => {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [isActing, setIsActing] = useState(false);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    const initConversation = async () => {
+      const summary = getScenarioSummary();
+      const history = [{ 
+        role: "user", 
+        parts: [{ text: `Analyze my financial plan: ${JSON.stringify(summary)}. Identify my archetype and suggest a 'Middle Way'.` }] 
+      }];
+      
+      const response = await callGeminiAgent(history, summary);
+      
+      setMessages([
+        { role: 'model', text: response.message }
+      ]);
+      setIsLoading(false);
+      
+      if (response.actions && response.actions.length > 0) {
+        onAIAction(response.actions);
+      }
+    };
+    initConversation();
+  }, []);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  const getScenarioSummary = () => {
+    const totalIncome = sumItems(scenario.globalIncomes);
+    const totalExpense = sumItems(scenario.globalExpenses);
+    const savingsRate = totalIncome > 0 ? ((totalIncome - totalExpense) / totalIncome) * 100 : 0;
+    
+    return {
+      planName: scenario.name,
+      monthlyIncome: totalIncome,
+      monthlyExpenses: totalExpense,
+      savingsRate: savingsRate.toFixed(1) + "%",
+      goals: scenario.savingsGoals.map(g => ({
+        id: g.id,
+        name: g.name,
+        target: g.targetType === 'percent' ? `${g.targetValue}%` : g.targetValue || 'None',
+        allocation: g.allocationType === 'percent' ? `${g.allocationValue}%` : g.allocationValue
+      })),
+      expensesDetail: scenario.globalExpenses.map(e => ({ id: e.id, name: e.name, amount: e.amount }))
+    };
+  };
+
+  const handleSend = async () => {
+    if (!input.trim()) return;
+    
+    const userMsg = { role: 'user', text: input };
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+    setIsLoading(true);
+
+    const summary = getScenarioSummary();
+    
+    const history = [
+        { role: "user", parts: [{ text: `Analyze my financial plan: ${JSON.stringify(summary)}.` }] },
+        ...messages.map(m => ({ role: m.role, parts: [{ text: m.text }] })),
+        { role: "user", parts: [{ text: input }] }
+    ];
+
+    const response = await callGeminiAgent(history, summary);
+    
+    setMessages(prev => [...prev, { role: 'model', text: response.message }]);
+    setIsLoading(false);
+
+    if (response.actions && response.actions.length > 0) {
+        setIsActing(true);
+        setTimeout(() => {
+            onAIAction(response.actions);
+            setIsActing(false);
+            setMessages(prev => [...prev, { role: 'system', text: `✅ Executed ${response.actions.length} update(s) to your plan.` }]);
+        }, 1000);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col h-[80vh]">
+        <div className="bg-indigo-900 p-4 flex justify-between items-center text-white shadow-md">
+          <div className="flex flex-col">
+            <h3 className="font-bold flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-indigo-400" /> FinVision AI Advisor
+            </h3>
+            <span className="text-[10px] text-indigo-300 opacity-80">Powered by the Middle Way philosophy</span>
+          </div>
+          <button onClick={onClose}><X className="w-5 h-5" /></button>
+        </div>
+        
+        <div className="flex-1 bg-slate-50 p-4 overflow-y-auto space-y-4" ref={scrollRef}>
+           {messages.length === 0 && isLoading && (
+               <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-2">
+                   <RefreshCw className="w-8 h-8 animate-spin text-indigo-400"/>
+                   <span className="text-xs">Analyzing your financial archetypes...</span>
+               </div>
+           )}
+           
+           {messages.map((msg, i) => (
+             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div 
+                  className={`max-w-[85%] p-3 rounded-xl text-sm leading-relaxed shadow-sm ${
+                    msg.role === 'user' 
+                      ? 'bg-indigo-600 text-white rounded-tr-none' 
+                      : msg.role === 'system'
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs italic text-center w-full'
+                        : 'bg-white text-slate-700 border border-slate-200 rounded-tl-none'
+                  }`}
+                >
+                    {msg.role === 'model' && <Bot className="w-4 h-4 mb-2 text-indigo-500" />}
+                    <div className="whitespace-pre-wrap">{msg.text}</div>
+                </div>
+             </div>
+           ))}
+           
+           {isLoading && messages.length > 0 && (
+               <div className="flex justify-start">
+                   <div className="bg-white p-3 rounded-xl rounded-tl-none border border-slate-200 shadow-sm flex gap-2 items-center">
+                       <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0s' }}></div>
+                       <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                       <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                   </div>
+               </div>
+           )}
+
+           {isActing && (
+               <div className="flex justify-center my-2">
+                   <span className="text-xs bg-indigo-100 text-indigo-700 px-3 py-1 rounded-full flex items-center gap-2 animate-pulse">
+                       <RefreshCw className="w-3 h-3 animate-spin"/> Updating Plan...
+                   </span>
+               </div>
+           )}
+        </div>
+
+        <div className="p-4 bg-white border-t border-slate-200">
+           <div className="flex gap-2">
+             <input 
+               type="text" 
+               className="flex-1 border border-slate-300 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none text-slate-700"
+               placeholder="Ask for advice or request changes..."
+               value={input}
+               onChange={(e) => setInput(e.target.value)}
+               onKeyDown={(e) => e.key === 'Enter' && !isLoading && handleSend()}
+               disabled={isLoading || isActing}
+             />
+             <button 
+               onClick={handleSend} 
+               disabled={!input.trim() || isLoading || isActing}
+               className="bg-indigo-600 text-white p-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+             >
+               <Send className="w-5 h-5" />
+             </button>
+           </div>
+           <div className="text-[10px] text-slate-400 mt-2 text-center">
+               Example: "Create a balanced plan for me." or "Add a vacation fund."
+           </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Smart Entry Modal
+const SmartEntryModal = ({ onClose, onSave }) => {
+  const [text, setText] = useState("");
+  const [processing, setProcessing] = useState(false);
+
+  const handleProcess = async () => {
+    if (!text) return;
+    setProcessing(true);
+    
+    const prompt = `Extract income and expenses from this text: "${text}". 
+    Return ONLY a JSON array with objects: { "type": "income" | "expense", "name": "string", "amount": number }. 
+    Example: [{"type": "income", "name": "Bonus", "amount": 500}]`;
+
+    try {
+      const result = await callGemini(prompt, "You are a JSON extractor.");
+      const cleanJson = result.replace(/```json/g, '').replace(/```/g, '').trim();
+      const data = JSON.parse(cleanJson);
+      
+      if (Array.isArray(data)) {
+        onSave(data);
+        onClose();
+      } else {
+        alert("Could not understand input. Please try again.");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("AI Error. Please try manually.");
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div className="bg-slate-900 p-4 flex justify-between items-center text-white">
+          <h3 className="font-bold flex items-center gap-2">
+            <Sparkles className="w-5 h-5 text-indigo-400" /> Smart Entry
+          </h3>
+          <button onClick={onClose}><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-6">
+          <p className="text-sm text-slate-500 mb-3">
+            Describe what happened this month. <br/>
+            <span className="italic text-xs">"Got a 500 CHF bonus but spent 120 on client dinner."</span>
+          </p>
+          <textarea 
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            className="w-full h-32 p-3 border rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+            placeholder="Type here..."
+          />
+        </div>
+        <div className="p-4 border-t bg-slate-50 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-200 rounded-lg">Cancel</button>
+          <button 
+            onClick={handleProcess} 
+            disabled={processing || !text}
+            className="px-4 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg flex items-center gap-2 disabled:opacity-50"
+          >
+            {processing ? <RefreshCw className="w-4 h-4 animate-spin"/> : <Sparkles className="w-4 h-4"/>}
+            {processing ? 'Processing...' : 'Auto-Add'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Recurring Form
+const RecurringForm = ({ onSave, onCancel, type, initialData, monthsList, availableGoals }) => {
+  const [name, setName] = useState(initialData?.name || '');
+  const [amount, setAmount] = useState(initialData?.amount || '');
+  const [frequency, setFrequency] = useState(initialData?.frequency || 'months');
+  const [interval, setInterval] = useState(initialData?.interval || 1);
+  const [endMonthIndex, setEndMonthIndex] = useState(initialData?.endMonthIndex ?? -1); 
+  const [selectedGoalId, setSelectedGoalId] = useState(initialData?.goalId || '');
+
+  const handleSubmit = () => {
+    if ((!name && type !== 'goalContribution') || !amount) return;
+    if (type === 'goalContribution' && !selectedGoalId) return;
+    const finalName = type === 'goalContribution' ? (name || `Contrib to ${availableGoals.find(g => g.id === selectedGoalId)?.name}`) : name;
+    onSave({ id: initialData?.id || uid(), name: finalName, amount: parseFloat(amount), frequency, interval: parseInt(interval) || 1, endMonthIndex: parseInt(endMonthIndex) === -1 ? null : parseInt(endMonthIndex), goalId: type === 'goalContribution' ? selectedGoalId : undefined });
+  };
+
+  return (
+    <div className="bg-slate-50 p-4 rounded-lg border border-indigo-100 mb-4 animate-in slide-in-from-top-2 relative">
+      <h5 className="text-xs font-bold uppercase tracking-wider text-indigo-600 mb-3 flex items-center gap-2"><Repeat className="w-3 h-3" /> {initialData ? 'Edit' : 'New'} Recurring {type === 'income' ? 'Income' : type === 'expense' ? 'Expense' : 'Contribution'}</h5>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        {type === 'goalContribution' ? (
+           <select className="p-2 text-sm border rounded focus:border-indigo-500 outline-none w-full text-slate-700 bg-white" value={selectedGoalId} onChange={(e) => setSelectedGoalId(e.target.value)}>
+             <option value="" disabled>Select Goal...</option>{availableGoals.map(g => (<option key={g.id} value={g.id}>{g.name}</option>))}
+           </select>
+        ) : (
+          <input type="text" placeholder="Name (e.g., Netflix)" className="p-2 text-sm border rounded focus:border-indigo-500 outline-none w-full text-slate-700" value={name} onChange={(e) => setName(e.target.value)} />
+        )}
+        <div className="relative"><span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-slate-400">CHF</span><input type="number" placeholder="Amount" className="w-full p-2 pl-8 text-sm border rounded focus:border-indigo-500 outline-none text-slate-700" value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
+      </div>
+      <div className="flex justify-between items-center gap-2 mt-2">
+         <div className="flex items-center gap-1 bg-white p-1 rounded border border-slate-200 flex-1">
+            <input type="number" min="1" className="w-8 p-1 text-sm border rounded text-center focus:border-indigo-500 outline-none text-slate-700" value={interval} onChange={(e) => setInterval(e.target.value)} />
+            <select value={frequency} onChange={(e) => setFrequency(e.target.value)} className="p-1 text-sm border-none bg-transparent font-semibold text-slate-700 outline-none cursor-pointer w-full"><option value="days">Days</option><option value="weeks">Weeks</option><option value="months">Months</option><option value="years">Years</option></select>
+         </div>
+         <div className="flex items-center gap-1 bg-white p-1 rounded border border-slate-200 flex-1">
+            <span className="text-[10px] text-slate-400 pl-1 whitespace-nowrap">Until:</span>
+            <select value={endMonthIndex} onChange={(e) => setEndMonthIndex(e.target.value)} className="p-1 text-sm border-none bg-transparent font-semibold text-slate-700 outline-none cursor-pointer w-full"><option value={-1}>Forever</option>{monthsList.map((m, idx) => (<option key={m.id} value={idx}>{m.name} {new Date(m.date).getFullYear()}</option>))}</select>
+         </div>
+      </div>
+      <div className="flex justify-end gap-2 mt-4">
+        <button onClick={onCancel} className="px-3 py-1 text-xs font-medium text-slate-500 hover:bg-slate-200 rounded">Cancel</button>
+        <button onClick={handleSubmit} className="px-3 py-1 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded flex items-center gap-1"><Check className="w-3 h-3" /> Save Rule</button>
+      </div>
+    </div>
+  );
+};
+
+// Savings Goal Form
+const SavingsGoalForm = ({ onSave, onCancel, initialData, months }) => {
+  const [name, setName] = useState(initialData?.name || '');
+  const [targetType, setTargetType] = useState(initialData?.targetType || 'fixed'); 
+  const [targetValue, setTargetValue] = useState(initialData?.targetValue ?? initialData?.targetAmount ?? '');
+  const [allocationType, setAllocationType] = useState(initialData?.allocationType || 'fixed'); 
+  const [allocationValue, setAllocationValue] = useState(initialData?.allocationValue || '');
+  const [balance, setBalance] = useState(initialData?.currentBalance || '');
+  const [startMonth, setStartMonth] = useState(initialData?.startMonthIndex || 0);
+  const [deadlineMonth, setDeadlineMonth] = useState(initialData?.deadlineMonthIndex ?? 6);
+  const [autoAdjust, setAutoAdjust] = useState(initialData?.autoAdjust || false);
+  const [continueAfterGoal, setContinueAfterGoal] = useState(initialData?.continueAfterGoal ?? false);
+  const [priority, setPriority] = useState(initialData?.priority || 1);
+  const [forceAllocation, setForceAllocation] = useState(initialData?.forceAllocation ?? false);
+
+  const monthOptions = months.map((m) => ({ 
+      value: m.index, 
+      label: m.name + " " + new Date(m.date).getFullYear() 
+  }));
+
+  const handleSubmit = () => {
+    if (!name) return;
+    onSave({
+      id: initialData?.id || uid(),
+      name,
+      targetType,
+      targetValue: targetValue === '' ? null : parseFloat(targetValue),
+      allocationType,
+      allocationValue: parseFloat(allocationValue) || 0,
+      currentBalance: parseFloat(balance) || 0,
+      startMonthIndex: parseInt(startMonth),
+      deadlineMonthIndex: parseInt(deadlineMonth),
+      autoAdjust,
+      continueAfterGoal,
+      priority,
+      forceAllocation
+    });
+  };
+
+  const hasTarget = targetValue !== '' && parseFloat(targetValue) > 0;
+
+  return (
+    <div className="bg-slate-50 p-3 rounded-lg border border-indigo-200 animate-in fade-in duration-200">
+      <div className="flex justify-between items-center mb-2">
+        <span className="text-xs font-bold text-indigo-600 uppercase">{initialData ? 'Editing Fund' : 'New Fund'}</span>
+        <button onClick={onCancel} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
+      </div>
+      <input type="text" placeholder="Fund Name" className="w-full p-2 mb-2 text-sm border rounded focus:border-indigo-500 outline-none bg-white font-bold text-slate-700" value={name} onChange={(e) => setName(e.target.value)} />
+      
+      {/* Type & Amount Inputs */}
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <div className="bg-white p-2 rounded border border-slate-200 flex flex-col">
+          <span className="text-[10px] font-bold text-slate-400 uppercase mb-2">Target Type</span>
+          <div className="flex flex-col gap-1 mb-3 flex-1">
+             <button onClick={() => setTargetType('fixed')} className={`px-2 py-1.5 rounded text-[10px] font-bold text-left flex items-center gap-2 border transition-all ${targetType === 'fixed' ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'text-slate-500 hover:bg-slate-50'}`}><Wallet className="w-3 h-3"/> Fixed Amount</button>
+             <button onClick={() => setTargetType('percent')} className={`px-2 py-1.5 rounded text-[10px] font-bold text-left flex items-center gap-2 border transition-all ${targetType === 'percent' ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'text-slate-500 hover:bg-slate-50'}`}><Percent className="w-3 h-3"/> % of Income</button>
+             <button onClick={() => setTargetType('multiplier')} className={`px-2 py-1.5 rounded text-[10px] font-bold text-left flex items-center gap-2 border transition-all ${targetType === 'multiplier' ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'text-slate-500 hover:bg-slate-50'}`}><Layers className="w-3 h-3"/> x Expenses</button>
+          </div>
+          <div className="relative border-t border-slate-100 pt-2">
+            <span className="text-[9px] text-slate-400 uppercase block mb-1">Target Value</span>
+            <input type="number" placeholder="0" className="w-full text-sm font-mono outline-none border-b border-dashed border-slate-300 focus:border-indigo-500 text-slate-700 pr-12 pb-0.5 bg-transparent" value={targetValue} onChange={(e) => setTargetValue(e.target.value)} />
+            <span className="absolute right-0 bottom-1 text-xs text-slate-400 pointer-events-none font-medium">{targetType === 'fixed' ? 'CHF' : targetType === 'multiplier' ? 'x Exp' : '% Inc'}</span>
+          </div>
+        </div>
+        
+        <div className={`p-2 rounded border border-slate-200 transition-colors flex flex-col ${autoAdjust ? 'bg-indigo-50 border-indigo-200' : 'bg-white'}`}>
+          <div className="flex justify-between items-center mb-2">
+            <span className={`text-[10px] font-bold uppercase ${autoAdjust ? 'text-indigo-600' : 'text-slate-400'}`}>Allocation</span>
+          </div>
+          {!autoAdjust ? (
+             <div className="flex flex-col gap-1 mb-3 flex-1">
+                <button onClick={() => setAllocationType('fixed')} className={`px-2 py-1.5 rounded text-[10px] font-bold text-left flex items-center gap-2 border transition-all ${allocationType === 'fixed' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}><Wallet className="w-3 h-3"/> Fixed / Mo</button>
+                <button onClick={() => setAllocationType('percent')} className={`px-2 py-1.5 rounded text-[10px] font-bold text-left flex items-center gap-2 border transition-all ${allocationType === 'percent' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}><Percent className="w-3 h-3"/> % of Income</button>
+             </div>
+          ) : (
+             <div className="flex-1 flex flex-col items-center justify-center text-center p-2"><RefreshCw className="w-6 h-6 text-indigo-300 mb-2 animate-spin-slow" /><span className="text-[10px] text-indigo-600 font-medium leading-tight">Auto-calculating...</span></div>
+          )}
+          {!autoAdjust && (
+            <div className="relative border-t border-slate-100 pt-2 mt-auto">
+                <span className="text-[9px] text-slate-400 uppercase block mb-1">Amount</span>
+                <input type="number" placeholder="0" className="w-full text-sm font-mono outline-none border-b border-dashed border-slate-300 focus:border-emerald-500 text-slate-700 pr-8 pb-0.5 bg-transparent" value={allocationValue} onChange={(e) => setAllocationValue(e.target.value)} />
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2 mb-2 p-2 rounded bg-slate-100 border border-slate-200">
+         <div className="flex items-center justify-between mb-2 pb-2 border-b border-slate-200">
+           <span className="text-xs font-bold text-slate-500 uppercase">Fund Priority</span>
+           <div className="flex gap-1">
+             {[1, 2, 3].map(p => (
+               <button 
+                 key={p}
+                 onClick={() => setPriority(p)}
+                 className={`w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center transition-all ${priority === p ? (p === 1 ? 'bg-rose-500 text-white' : p === 2 ? 'bg-amber-500 text-white' : 'bg-blue-500 text-white') : 'bg-white border text-slate-400'}`}
+               >
+                 {p}
+               </button>
+             ))}
+           </div>
+         </div>
+         
+         {hasTarget && (
+            <div className="flex items-center gap-2">
+                <input type="checkbox" id="autoAdjust" checked={autoAdjust} onChange={(e) => setAutoAdjust(e.target.checked)} className="accent-indigo-600 w-4 h-4 rounded cursor-pointer" />
+                <label htmlFor="autoAdjust" className="text-xs font-bold text-slate-700 cursor-pointer flex-1">Auto-adjust to hit target?</label>
+            </div>
+         )}
+         
+         {hasTarget && !autoAdjust && (
+            <div className="flex items-center gap-2">
+                <input type="checkbox" id="continueAfterGoal" checked={continueAfterGoal} onChange={(e) => setContinueAfterGoal(e.target.checked)} className="accent-indigo-600 w-4 h-4 rounded cursor-pointer" />
+                <label htmlFor="continueAfterGoal" className="text-xs font-bold text-slate-700 cursor-pointer flex-1">Continue saving after target?</label>
+            </div>
+         )}
+         
+         <div className="flex items-center gap-2 pt-2 border-t border-slate-200">
+             <input type="checkbox" id="forceAllocation" checked={forceAllocation} onChange={(e) => setForceAllocation(e.target.checked)} className="accent-rose-500 w-4 h-4 rounded cursor-pointer" />
+             <div className="flex-1">
+                 <label htmlFor="forceAllocation" className="text-xs font-bold text-slate-700 cursor-pointer block flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3 text-rose-500"/> Fund even if balance is low
+                 </label>
+                 <span className="text-[10px] text-slate-500 block">Overrides main balance limit</span>
+             </div>
+         </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 mb-3">
+         <div className="relative"><span className="text-[9px] text-slate-400 block mb-1">Start Saving</span><select value={startMonth} onChange={(e) => setStartMonth(e.target.value)} className="w-full text-xs border rounded p-1 bg-white text-slate-700">{monthOptions.map(opt => (<option key={opt.value} value={opt.value}>{opt.label}</option>))}</select></div>
+         <div className="relative"><span className="text-[9px] text-slate-400 block mb-1">Deadline</span><select value={deadlineMonth} onChange={(e) => setDeadlineMonth(e.target.value)} className="w-full text-xs border rounded p-1 bg-white text-slate-700">{monthOptions.map(opt => (<option key={opt.value} value={opt.value}>{opt.label}</option>))}</select></div>
+      </div>
+      <div className="relative mb-3"><span className="text-[9px] text-slate-400 block mb-1">Starting Balance (Already Saved)</span><input type="number" className="w-full text-xs font-mono border rounded p-1 text-slate-700" value={balance} onChange={(e) => setBalance(e.target.value)} /></div>
+
+      <div className="flex justify-end gap-2">
+        <button onClick={handleSubmit} className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded flex items-center gap-1 w-full justify-center"><Check className="w-3 h-3" /> Save Changes</button>
+      </div>
+    </div>
+  );
+};
+
+// Category List
+const CategoryList = ({ title, items, onUpdate, type, isGlobal, recurringItems, onAddRecurring, onEditRecurring, onDeleteRecurring, monthsList, availableGoals, overrides, onOverrideChange }) => {
+  const isIncome = type === 'income';
+  const isGoalContrib = type === 'goalContribution';
+  
+  let oneOffTotal = 0;
+  let recurringTotal = 0;
+
+  if (isGlobal) {
+    oneOffTotal = sumItems(items);
+    recurringTotal = recurringItems ? sumItems(recurringItems) : 0;
+  } else if (overrides) {
+    items.forEach(item => {
+       const val = overrides[item.id] !== undefined ? parseFloat(overrides[item.id]) : item.amount;
+       oneOffTotal += val || 0;
+    });
+    recurringTotal = recurringItems ? sumItems(recurringItems) : 0;
+  } else {
+    oneOffTotal = sumItems(items);
+    recurringTotal = recurringItems ? sumItems(recurringItems) : 0;
+  }
+
+  const total = oneOffTotal + recurringTotal;
+  const [showRecurringForm, setShowRecurringForm] = useState(false);
+  const [editingRecurringItem, setEditingRecurringItem] = useState(null);
+
+  const addItem = () => {
+    const newItem = isGoalContrib ? { id: uid(), goalId: '', amount: 0, name: '' } : { id: uid(), name: '', amount: 0 };
+    onUpdate([...items, newItem]);
+  };
+  const updateItem = (id, field, value) => {
+    onUpdate(items.map(item => {
+      if (item.id !== id) return item;
+      const updated = { ...item, [field]: value };
+      if (field === 'goalId' && availableGoals) {
+        const g = availableGoals.find(g => g.id === value);
+        updated.name = g ? `To: ${g.name}` : '';
+      }
+      return updated;
+    }));
+  };
+  const removeItem = (id) => onUpdate(items.filter(item => item.id !== id));
+  
+  const handleSaveRecurring = (data) => {
+    if (editingRecurringItem) { onEditRecurring({ ...editingRecurringItem, ...data }); setEditingRecurringItem(null); } else { onAddRecurring(data); }
+    setShowRecurringForm(false);
+  };
+  const startEdit = (item) => { setEditingRecurringItem(item); setShowRecurringForm(true); };
+
+  return (
+    <div className={`flex flex-col h-full ${isGlobal ? 'bg-white/5 border border-white/10 rounded-xl' : ''}`}>
+      <div className={`p-3 flex justify-between items-center ${isGlobal ? 'border-b border-white/10' : ''}`}>
+        <h4 className={`text-xs font-bold uppercase tracking-wider flex items-center gap-2 ${isGlobal ? 'text-indigo-200' : 'text-slate-500'}`}>
+          {isIncome ? <TrendingUp className="w-3 h-3" /> : isGoalContrib ? <ArrowRightCircle className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />} {title}
+        </h4>
+        <span className={`font-mono font-bold text-sm ${isGoalContrib ? 'text-indigo-500' : isIncome ? (isGlobal ? 'text-emerald-400' : 'text-emerald-600') : (isGlobal ? 'text-rose-400' : 'text-rose-600')}`}>{formatCHF(total)}</span>
+      </div>
+      <div className="p-3 space-y-2">
+        {showRecurringForm && <RecurringForm type={type} initialData={editingRecurringItem} monthsList={monthsList} availableGoals={availableGoals} onCancel={() => { setShowRecurringForm(false); setEditingRecurringItem(null); }} onSave={handleSaveRecurring} />}
+        
+        {recurringItems && recurringItems.map(item => (
+           <div key={item.id} className="flex gap-2 items-center group opacity-90">
+             <div className={`p-1.5 rounded ${isGoalContrib ? 'bg-indigo-50 text-indigo-600' : isIncome ? 'bg-indigo-50 text-indigo-600' : 'bg-purple-50 text-purple-600'}`}><Repeat className="w-3 h-3" /></div>
+             <div className={`flex-1 text-sm font-medium truncate ${isGlobal ? 'text-white' : 'text-slate-600'}`}>{item.name} <div className={`text-[10px] font-normal ${isGlobal ? 'text-slate-400' : 'text-slate-400'}`}>{item.interval > 1 ? `Every ${item.interval} ` : 'Every '}{item.frequency} ({formatCHF(item.amount)})</div></div>
+             {(isGlobal || (onEditRecurring && onDeleteRecurring)) && (
+               <>
+                 <button onClick={() => startEdit(item)} className="text-slate-400 hover:text-indigo-500"><Edit2 className="w-3 h-3"/></button>
+                 <button onClick={() => onDeleteRecurring(item.id)} className="text-slate-400 hover:text-rose-500"><Trash2 className="w-3 h-3"/></button>
+               </>
+             )}
+           </div>
+        ))}
+        
+        {recurringItems?.length > 0 && items.length > 0 && <div className="h-px bg-slate-100 my-2"></div>}
+
+        {/* Regular Items / Global overrides */}
+        {items.map((item) => {
+          if (overrides) {
+             const currentValue = overrides[item.id] !== undefined ? overrides[item.id] : item.amount;
+             const isModified = overrides[item.id] !== undefined;
+             
+             return (
+               <div key={item.id} className={`flex gap-2 items-center group ${isModified ? 'bg-indigo-50 rounded px-1 -mx-1' : ''}`}>
+                 <span className="flex-1 text-sm text-slate-700">{item.name} {isModified && <span className="text-[10px] text-indigo-500 font-bold">(Modified)</span>}</span>
+                 <input 
+                   type="number" 
+                   value={currentValue} 
+                   onChange={(e) => onOverrideChange(item.id, e.target.value)} 
+                   className={`w-20 text-right text-sm bg-transparent border-b border-dashed ${isModified ? 'border-indigo-500 font-bold text-indigo-700' : 'border-slate-300 text-slate-500'} focus:border-indigo-500 outline-none font-mono`} 
+                 />
+                 {isModified && (
+                   <button onClick={() => onOverrideChange(item.id, undefined)} className="text-slate-400 hover:text-rose-500" title="Reset to Global"><RefreshCw className="w-3 h-3"/></button>
+                 )}
+               </div>
+             );
+          }
+
+          return (
+            <div key={item.id} className="flex gap-2 items-center group">
+              {isGoalContrib ? (
+                 <select className="flex-1 text-sm bg-transparent border-b border-transparent focus:border-indigo-500 outline-none text-slate-700 w-full" value={item.goalId || ''} onChange={(e) => updateItem(item.id, 'goalId', e.target.value)}>
+                   <option value="" disabled>Select Fund...</option>{availableGoals.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                 </select>
+              ) : (
+                <input type="text" placeholder="Desc" value={item.name} onChange={(e) => updateItem(item.id, 'name', e.target.value)} className={`flex-1 text-sm bg-transparent border-b border-transparent focus:border-indigo-500 outline-none ${isGlobal ? 'text-white placeholder-slate-500' : 'text-slate-700'}`} />
+              )}
+              <input type="number" placeholder="0" value={item.amount || ''} onChange={(e) => updateItem(item.id, 'amount', parseFloat(e.target.value))} className={`w-16 text-right text-sm bg-transparent border-b border-transparent focus:border-indigo-500 outline-none font-mono ${isGlobal ? 'text-white' : 'text-slate-700'}`} />
+              <button onClick={() => removeItem(item.id)} className="text-slate-400 hover:text-rose-500"><X className="w-3 h-3"/></button>
+            </div>
+          );
+        })}
+        
+        {!overrides && (
+          <div className="flex gap-4 pt-2">
+             <button onClick={addItem} className={`text-xs flex items-center gap-1 hover:text-indigo-600 ${isGlobal ? 'text-slate-400' : 'text-slate-400'}`}><Plus className="w-3 h-3"/> One-off</button>
+             {!isGlobal && !showRecurringForm && <button onClick={() => setShowRecurringForm(true)} className="text-xs flex items-center gap-1 text-indigo-400 hover:text-indigo-600"><Repeat className="w-3 h-3"/> Recurring</button>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const CivilServiceModal = ({ settings, onClose, onSave, monthsList }) => {
+  const [active, setActive] = useState(settings?.active || false);
+  const [startMonth, setStartMonth] = useState(settings?.startMonthIndex || 0);
+  const [duration, setDuration] = useState(settings?.durationMonths || 1);
+
+  const handleSave = () => {
+    onSave({ 
+      active, 
+      startMonthIndex: parseInt(startMonth), 
+      durationMonths: parseInt(duration) 
+    });
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div className="bg-slate-900 p-4 flex justify-between items-center text-white">
+          <h3 className="font-bold flex items-center gap-2">
+            <Briefcase className="w-5 h-5 text-indigo-400" /> Civil Service Planner
+          </h3>
+          <button onClick={onClose}><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-6">
+          <p className="text-sm text-slate-500 mb-6">
+            When active, your global income will be replaced by <strong>80% of your average income</strong> from the 6 months prior to the service start date.
+          </p>
+          
+          <div className="flex items-center gap-3 mb-6 bg-slate-50 p-3 rounded-lg border border-slate-200">
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} className="sr-only peer" />
+              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+            </label>
+            <span className="text-sm font-bold text-slate-700">Enable Civil Service Mode</span>
+          </div>
+
+          {active && (
+            <div className="space-y-4 animate-in slide-in-from-top-2">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Start Month</label>
+                <select 
+                  value={startMonth} 
+                  onChange={(e) => setStartMonth(e.target.value)}
+                  className="w-full p-2 border rounded-lg text-sm bg-white"
+                >
+                  {monthsList.map((m, i) => (
+                    <option key={m.id} value={i}>{m.fullName}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Duration (Months)</label>
+                <input 
+                  type="number" 
+                  min="1" 
+                  max="24" 
+                  value={duration} 
+                  onChange={(e) => setDuration(e.target.value)}
+                  className="w-full p-2 border rounded-lg text-sm"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="p-4 border-t bg-slate-50 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-200 rounded-lg">Cancel</button>
+          <button onClick={handleSave} className="px-4 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg">Apply Plan</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ProjectedGraph = ({ data, savingsGoals, goalCalculations, civilService }) => {
+  const [zoomX, setZoomX] = useState(1);
+  const [zoomY, setZoomY] = useState(1);
+  const [hoveredData, setHoveredData] = useState(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const containerRef = useRef(null);
+  const svgRef = useRef(null);
+
+  if (!data || data.length === 0) return null;
+
+  let maxValue = 0;
+  let minValue = 0;
+
+  const points = data.map((d, i) => {
+    maxValue = Math.max(maxValue, d.mainBalance);
+    minValue = Math.min(minValue, d.mainBalance);
+    Object.values(d.goalBalances).forEach(val => maxValue = Math.max(maxValue, val));
+    return { x: i, mainBalance: d.mainBalance, goalBalances: d.goalBalances };
+  });
+
+  const range = maxValue - minValue || 1000;
+  const padding = range * 0.1;
+  const yMin = Math.min(0, minValue - padding);
+  const yRange = (maxValue + padding) - yMin;
+
+  const width = 1000 * zoomX;
+  const height = 300 * zoomY;
+  const paddingX = 40;
+  const paddingY = 20;
+  
+  const graphWidth = width - (paddingX * 2);
+  const graphHeight = height - (paddingY * 2);
+
+  const getX = (index) => paddingX + (index / (data.length - 1)) * graphWidth;
+  const getY = (val) => height - paddingY - ((val - yMin) / yRange) * graphHeight;
+
+  const mainLinePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(p.mainBalance)}`).join(' ');
+
+  const goalPaths = savingsGoals.map((goal, idx) => {
+    const color = ['#10b981', '#f59e0b', '#ec4899', '#8b5cf6'][idx % 4]; 
+    const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(p.goalBalances[goal.id] || 0)}`).join(' ');
+    return { id: goal.id, path, color, name: goal.name };
+  });
+
+  const handleMouseMove = (e) => {
+      if (!containerRef.current) return;
+      
+      const rect = containerRef.current.getBoundingClientRect();
+      const scrollLeft = containerRef.current.scrollLeft;
+      const x = e.clientX - rect.left + scrollLeft;
+      const y = e.clientY - rect.top; 
+
+      const ratio = Math.max(0, Math.min(1, (x - paddingX) / graphWidth));
+      const index = Math.round(ratio * (data.length - 1));
+      const tooltipX = e.clientX - rect.left;
+      
+      setHoveredData({
+          index,
+          x: tooltipX,
+          y
+      });
+  };
+
+  const handleScroll = (e) => {
+      setScrollTop(e.target.scrollTop);
+  };
+
+  const handleMouseLeave = () => {
+      setHoveredData(null);
+  };
+
+  return (
+    <div className="relative group/graph">
+        {/* Controls */}
+        <div className="absolute top-2 right-2 flex flex-col gap-1 z-20 opacity-0 group-hover/graph:opacity-100 transition-opacity bg-slate-800/80 p-1 rounded backdrop-blur-sm">
+            <div className="flex gap-1">
+                <button onClick={() => setZoomX(Math.min(3, zoomX + 0.1))} className="p-1 text-white hover:bg-white/20 rounded"><ZoomIn className="w-3 h-3" /> X</button>
+                <button onClick={() => setZoomX(Math.max(1, zoomX - 0.1))} className="p-1 text-white hover:bg-white/20 rounded"><ZoomOut className="w-3 h-3" /> X</button>
+            </div>
+            <div className="flex gap-1">
+                <button onClick={() => setZoomY(Math.min(3, zoomY + 0.1))} className="p-1 text-white hover:bg-white/20 rounded"><ZoomIn className="w-3 h-3" /> Y</button>
+                <button onClick={() => setZoomY(Math.max(1, zoomY - 0.1))} className="p-1 text-white hover:bg-white/20 rounded"><ZoomOut className="w-3 h-3" /> Y</button>
+            </div>
+        </div>
+
+        <div 
+            className="w-full overflow-auto h-[320px] rounded-lg border border-slate-700/50 relative bg-slate-900 shadow-inner" 
+            ref={containerRef}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={handleMouseLeave}
+            onScroll={handleScroll}
+        >
+            <svg width={width} height={height} className="overflow-visible" ref={svgRef}>
+            
+            {data.map((_, i) => {
+                const x = getX(i);
+                return (
+                    <line key={i} x1={x} y1={paddingY} x2={x} y2={height - paddingY} stroke="#334155" strokeWidth="1" strokeDasharray="2 4" opacity="0.2" />
+                );
+            })}
+
+            {[0, 0.25, 0.5, 0.75, 1].map(t => {
+                const y = height - paddingY - (t * graphHeight);
+                const val = yMin + (t * yRange);
+                return (
+                <g key={t}>
+                    <line x1={paddingX} y1={y} x2={width - paddingX} y2={y} stroke="#334155" strokeWidth="1" strokeDasharray="4 4" opacity="0.3" />
+                    <text x={paddingX - 10} y={y + 4} textAnchor="end" className="fill-slate-500 text-[10px] font-mono">{val >= 1000 ? `${(val/1000).toFixed(1)}k` : val.toFixed(0)}</text>
+                </g>
+                );
+            })}
+
+            {civilService?.active && (
+                <rect 
+                x={getX(civilService.startMonthIndex)} 
+                y={paddingY} 
+                width={getX(Math.min(data.length - 1, civilService.startMonthIndex + civilService.durationMonths - 1)) - getX(civilService.startMonthIndex)} 
+                height={height - paddingY * 2}
+                fill="#6366f1" 
+                opacity="0.1" 
+                />
+            )}
+
+            {yMin < 0 && (yMin + yRange) > 0 && <line x1={paddingX} y1={getY(0)} x2={width - paddingX} y2={getY(0)} stroke="#94a3b8" strokeWidth="1" />}
+
+            {goalPaths.map(g => <path key={g.id} d={g.path} fill="none" stroke={g.color} strokeWidth="2" strokeDasharray="2 2" />)}
+
+            <path d={mainLinePath} fill="none" stroke="#6366f1" strokeWidth="3" />
+            <path d={`${mainLinePath} L ${width - paddingX} ${getY(yMin)} L ${paddingX} ${getY(yMin)} Z`} fill="url(#gradientMain)" opacity="0.2" />
+            
+            <defs>
+                <linearGradient id="gradientMain" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#6366f1" />
+                <stop offset="100%" stopColor="#6366f1" stopOpacity="0" />
+                </linearGradient>
+            </defs>
+
+            {savingsGoals.map((goal, idx) => {
+                if (!goal.targetValue && goal.targetType !== 'percent' && goal.targetType !== 'multiplier') return null;
+
+                if (goal.deadlineMonthIndex < data.length) {
+                    const x = getX(goal.deadlineMonthIndex);
+                    const calculatedTarget = goalCalculations[goal.id]?.calculatedTarget || 0;
+                    const yTarget = getY(calculatedTarget);
+                    const staggerOffset = (idx % 3) * 15; 
+                    const labelY = Math.max(paddingY, scrollTop + 20) + staggerOffset;
+
+                    return (
+                        <g key={goal.id}>
+                            <line x1={x} y1={labelY} x2={x} y2={height - paddingY} stroke="#cbd5e1" strokeWidth="1" strokeDasharray="2 2" />
+                            <circle cx={x} cy={yTarget} r="4" fill="#ef4444" />
+                            <text x={x} y={labelY - 5} textAnchor="middle" className="fill-indigo-300 text-[10px] font-bold uppercase tracking-wider" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>{goal.name} Due</text>
+                            <text x={x + 5} y={yTarget} textAnchor="start" dominantBaseline="middle" className="fill-white text-[9px] font-mono bg-slate-900/80 px-1 rounded shadow-sm">
+                                {formatCHF(calculatedTarget)}
+                            </text>
+                        </g>
+                    );
+                }
+                return null;
+            })}
+            </svg>
+
+            {hoveredData && data[hoveredData.index] && (
+                <div 
+                    className="absolute pointer-events-none z-50 bg-slate-800/95 text-white p-3 rounded-lg shadow-2xl border border-slate-700 backdrop-blur-md text-xs"
+                    style={{ 
+                        left: hoveredData.x, 
+                        top: hoveredData.y,
+                        transform: 'translate(-50%, -120%)', // Position above cursor
+                        minWidth: '180px'
+                    }}
+                >
+                    <div className="font-bold text-sm mb-2 border-b border-slate-600 pb-1 flex justify-between">
+                        <span>{data[hoveredData.index].fullName}</span>
+                        <span className="text-slate-400 font-normal">#{hoveredData.index + 1}</span>
+                    </div>
+                    <div className="space-y-1">
+                        <div className="flex justify-between items-center text-indigo-300 font-semibold">
+                            <span>Main Balance:</span>
+                            <span className="font-mono">{formatCHF(data[hoveredData.index].mainBalance)}</span>
+                        </div>
+                        {savingsGoals.map((g, idx) => (
+                             <div key={g.id} className="flex justify-between items-center" style={{ color: ['#10b981', '#f59e0b', '#ec4899', '#8b5cf6'][idx % 4] }}>
+                                <span>{g.name}:</span>
+                                <span className="font-mono opacity-90">{formatCHF(data[hoveredData.index].goalBalances[g.id])}</span>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="absolute left-1/2 bottom-0 w-px h-4 bg-slate-500 translate-y-full -translate-x-1/2"></div>
+                </div>
+            )}
+        </div>
+    </div>
+  );
+};
+
+// ... MonthCard ...
+const MonthCard = ({ 
+  month, globalIncomes, globalExpenses, onUpdate, 
+  recurringIncomes, recurringExpenses, recurringGoalContributions,
+  onAddRecurring, onEditRecurring, onDeleteRecurring, 
+  monthsList, availableGoals, requiredIncome, isCivilService, civilServiceIncome,
+  autoAllocations 
+}) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [showGlobalOverrides, setShowGlobalOverrides] = useState(false);
+  const [showSmartEntry, setShowSmartEntry] = useState(false);
+  
+  // Calculate Totals based on Overrides
+  const globalIncomeTotal = calculateGlobalTotal(globalIncomes, month.globalOverrides);
+  const globalExpenseTotal = calculateGlobalTotal(globalExpenses, month.globalOverrides);
+
+  const activeRecurringIncomes = calculateRecurringForMonth(month.index, recurringIncomes);
+  const activeRecurringExpenses = calculateRecurringForMonth(month.index, recurringExpenses);
+  const activeRecurringGoalContribs = calculateRecurringForMonth(month.index, recurringGoalContributions);
+
+  const recIncTotal = sumItems(activeRecurringIncomes.map(i => ({ amount: i.computedAmount })));
+  const recExpTotal = sumItems(activeRecurringExpenses.map(i => ({ amount: i.computedAmount })));
+  const recGoalTotal = sumItems(activeRecurringGoalContribs.map(i => ({ amount: i.computedAmount })));
+
+  const specificIncomeTotal = sumItems(month.specificIncomes);
+  const specificExpenseTotal = sumItems(month.specificExpenses);
+  const specificGoalTotal = sumItems(month.specificGoalContributions);
+  
+  // Actuals Logic
+  const actualNet = (month.actualIncome || 0) - (month.actualExpense || 0); // Simplified for actuals display
+  const projTotalIncome = (isCivilService ? civilServiceIncome : globalIncomeTotal) + specificIncomeTotal + recIncTotal;
+  const projTotalExpense = globalExpenseTotal + specificExpenseTotal + recExpTotal;
+  
+  // Auto Allocations total
+  const autoAllocTotal = Object.values(autoAllocations || {}).reduce((sum, val) => sum + val, 0);
+
+  const net = month.isActual 
+    ? actualNet 
+    : projTotalIncome - projTotalExpense - (specificGoalTotal + recGoalTotal + autoAllocTotal);
+  
+  const targetDiff = projTotalIncome - requiredIncome;
+
+  const updateGlobalOverride = (itemId, value) => {
+    const newOverrides = { ...month.globalOverrides };
+    if (value === undefined || value === '') {
+        delete newOverrides[itemId];
+    } else {
+        newOverrides[itemId] = parseFloat(value);
+    }
+    onUpdate({ ...month, globalOverrides: newOverrides });
+  };
+
+  const handleActualChange = (field, value) => {
+    onUpdate({ ...month, [field]: parseFloat(value) || 0 });
+  };
+
+  const handleUpdateActualGoals = (goalId, value) => {
+    const newBalances = { ...month.actualGoalBalances, [goalId]: parseFloat(value) || 0 };
+    onUpdate({ ...month, actualGoalBalances: newBalances });
+  };
+
+  const handleSmartEntrySave = (items) => {
+    // Merge new items into existing lists
+    const newInc = [...month.specificIncomes];
+    const newExp = [...month.specificExpenses];
+    
+    items.forEach(item => {
+      const newItem = { id: uid(), name: item.name, amount: item.amount };
+      if (item.type === 'income') newInc.push(newItem);
+      else if (item.type === 'expense') newExp.push(newItem);
+    });
+
+    onUpdate({ 
+      ...month, 
+      specificIncomes: newInc, 
+      specificExpenses: newExp 
+    });
+  };
+
+  return (
+    <div className={`bg-white border rounded-xl shadow-sm transition-all duration-300 overflow-hidden ${isExpanded ? 'ring-2 ring-indigo-500 shadow-md' : 'hover:border-indigo-300'} ${isCivilService ? 'bg-indigo-50/30' : ''} ${month.isActual ? 'bg-slate-50 border-slate-300' : ''}`}>
+      <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between cursor-pointer gap-4" onClick={() => setIsExpanded(!isExpanded)}>
+        <div className="flex items-center gap-4">
+          <div className={`w-14 h-14 rounded-xl flex flex-col items-center justify-center font-bold text-sm uppercase shadow-sm relative border ${month.isActual ? 'bg-slate-700 text-white border-slate-800' : isCivilService ? 'bg-indigo-600 text-white border-indigo-700' : net >= 0 ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-rose-50 text-rose-700 border-rose-100'}`}>
+            <span className="text-[10px] opacity-60 leading-none">{new Date(month.date).getFullYear()}</span>
+            <span className="text-lg leading-none">{month.name}</span>
+            {isCivilService && !month.isActual && <Briefcase className="w-3 h-3 absolute -bottom-1" />}
+            {month.isActual && <Lock className="w-3 h-3 absolute -bottom-1 text-slate-400" />}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+               <h4 className="font-semibold text-slate-800 text-lg">{month.fullName}</h4>
+               {month.isActual && <span className="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full font-bold flex items-center gap-1"><Lock className="w-3 h-3"/> ACTUALS</span>}
+               {isCivilService && !month.isActual && <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold">CIVIL SERVICE</span>}
+            </div>
+            
+            {!month.isActual && (
+                <div className="flex items-center gap-4 mt-1">
+                <div className="text-xs">
+                    <span className="text-slate-400 uppercase tracking-wide text-[9px]">Projected</span>
+                    <div className="font-bold text-slate-700">{formatCHF(projTotalIncome)}</div>
+                </div>
+                
+                <div className={`text-xs flex items-center ${targetDiff >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                    {targetDiff >= 0 ? <CheckCircle2 className="w-4 h-4 mr-1"/> : <AlertTriangle className="w-4 h-4 mr-1"/>}
+                </div>
+
+                <div className="text-xs">
+                    <span className="text-slate-400 uppercase tracking-wide text-[9px]">Target Need</span>
+                    <div className="font-bold text-indigo-600">{formatCHF(requiredIncome)}</div>
+                </div>
+                </div>
+            )}
+            {month.isActual && (
+                <div className="text-xs mt-1 text-slate-500">
+                    Realized Net: <span className="font-bold text-slate-700">{formatCHF(actualNet)}</span>
+                </div>
+            )}
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-4">
+           {!month.isActual && (
+            <div className="text-right hidden sm:block">
+                <div className="text-[9px] text-slate-400 uppercase">Net Flow</div>
+                <div className={`text-sm font-medium ${net >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{net >= 0 ? '+' : ''}{formatCHF(net)}</div>
+            </div>
+           )}
+           <div className="pl-2">
+             {isExpanded ? <ChevronUp className="w-5 h-5 text-slate-400" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}
+           </div>
+        </div>
+      </div>
+      
+      {isExpanded && (
+        <div className="border-t bg-slate-50/50 p-6">
+          <div className="flex justify-between items-center mb-4">
+             <button onClick={() => onUpdate({ ...month, isActual: !month.isActual })} className={`text-xs font-bold px-3 py-1.5 rounded flex items-center gap-2 border transition-colors ${month.isActual ? 'bg-slate-700 text-white border-slate-700' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'}`}>
+                {month.isActual ? <><Unlock className="w-3 h-3"/> Unlock Projections</> : <><Lock className="w-3 h-3"/> Switch to Actuals</>}
+             </button>
+             {!month.isActual && <button onClick={() => setShowSmartEntry(true)} className="text-xs font-bold px-3 py-1.5 rounded flex items-center gap-2 bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow hover:shadow-lg transition-all"><Sparkles className="w-3 h-3" /> Smart Entry</button>}
+          </div>
+
+          {month.isActual ? (
+             <div className="space-y-6 animate-in fade-in">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                        <h5 className="text-xs font-bold text-slate-400 uppercase mb-3">Realized Cash Flow</h5>
+                        <div className="space-y-3">
+                            <div><label className="block text-xs text-slate-500 mb-1">Total Actual Income</label><input type="number" value={month.actualIncome} onChange={(e) => handleActualChange('actualIncome', e.target.value)} className="w-full p-2 border rounded text-sm font-bold text-slate-700" /></div>
+                            <div><label className="block text-xs text-slate-500 mb-1">Total Actual Expenses</label><input type="number" value={month.actualExpense} onChange={(e) => handleActualChange('actualExpense', e.target.value)} className="w-full p-2 border rounded text-sm font-bold text-slate-700" /></div>
+                        </div>
+                    </div>
+                    <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                        <h5 className="text-xs font-bold text-slate-400 uppercase mb-3">Month-End Balances</h5>
+                        <div className="space-y-3">
+                            <div><label className="block text-xs text-indigo-500 font-bold mb-1">Main Account Balance</label><input type="number" value={month.actualMainBalance} onChange={(e) => handleActualChange('actualMainBalance', e.target.value)} className="w-full p-2 border border-indigo-200 rounded text-sm font-bold text-indigo-700 bg-indigo-50/50" /></div>
+                            <div className="h-px bg-slate-100 my-2"></div>
+                            {availableGoals.map(g => (
+                                <div key={g.id} className="flex items-center gap-2"><label className="text-xs text-slate-600 flex-1 truncate">{g.name}</label><input type="number" value={month.actualGoalBalances?.[g.id] || 0} onChange={(e) => handleUpdateActualGoals(g.id, e.target.value)} className="w-24 p-1.5 border rounded text-sm text-right" /></div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+             </div>
+          ) : (
+             <div className="animate-in fade-in">
+                <div className="mb-4 bg-indigo-50 border border-indigo-100 p-3 rounded-lg flex justify-between items-center text-xs text-indigo-800">
+                    <div><strong>Income Target Calculation:</strong> Expenses ({formatCHF(projTotalExpense + specificGoalTotal + recGoalTotal)}) + Goal Needs.{isCivilService && <div className="mt-1 text-indigo-600 font-medium">Income fixed at 80% of pre-service average.</div>}</div>
+                    <div className="text-right">Difference: <span className={targetDiff >= 0 ? "font-bold text-emerald-600" : "font-bold text-rose-600"}>{formatCHF(targetDiff)}</span></div>
+                </div>
+                <div className="mb-4">
+                    <button onClick={() => setShowGlobalOverrides(!showGlobalOverrides)} className="text-xs font-bold text-slate-500 hover:text-indigo-600 flex items-center gap-1 mb-2">{showGlobalOverrides ? <ChevronUp className="w-3 h-3"/> : <ChevronDown className="w-3 h-3"/>} {showGlobalOverrides ? 'Hide Global Budget Details' : 'View/Edit Global Budget for this Month'}</button>
+                    {showGlobalOverrides && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-100 p-3 rounded-lg border border-slate-200">
+                            <CategoryList title="Global Income" type="income" isGlobal={false} items={globalIncomes} overrides={month.globalOverrides} onOverrideChange={updateGlobalOverride} />
+                            <CategoryList title="Global Expenses" type="expense" isGlobal={false} items={globalExpenses} overrides={month.globalOverrides} onOverrideChange={updateGlobalOverride} />
+                        </div>
+                    )}
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div className="bg-white rounded-lg border border-slate-200">
+                    <div className="text-xs font-bold text-slate-400 uppercase tracking-wider p-3 border-b border-slate-100">Income</div>
+                    <CategoryList title="Income" type="income" items={month.specificIncomes} recurringItems={activeRecurringIncomes} monthsList={monthsList} onUpdate={(items) => onUpdate({ ...month, specificIncomes: items })} onAddRecurring={(data) => onAddRecurring('income', data)} onEditRecurring={(data) => onEditRecurring('income', data)} onDeleteRecurring={(id) => onDeleteRecurring('income', id)} isGlobal={false} />
+                    </div>
+                    <div className="bg-white rounded-lg border border-slate-200">
+                    <div className="text-xs font-bold text-slate-400 uppercase tracking-wider p-3 border-b border-slate-100">Expenses</div>
+                    <CategoryList title="Expenses" type="expense" items={month.specificExpenses} recurringItems={activeRecurringExpenses} monthsList={monthsList} onUpdate={(items) => onUpdate({ ...month, specificExpenses: items })} onAddRecurring={(data) => onAddRecurring('expense', data)} onEditRecurring={(data) => onEditRecurring('expense', data)} onDeleteRecurring={(id) => onDeleteRecurring('expense', id)} isGlobal={false} />
+                    </div>
+                    <div className="bg-white rounded-lg border border-slate-200">
+                    <div className="text-xs font-bold text-indigo-400 uppercase tracking-wider p-3 border-b border-slate-100">Fund Transfers</div>
+                    <CategoryList title="Transfers" type="goalContribution" items={month.specificGoalContributions} recurringItems={activeRecurringGoalContribs} monthsList={monthsList} availableGoals={availableGoals} onUpdate={(items) => onUpdate({ ...month, specificGoalContributions: items })} onAddRecurring={(data) => onAddRecurring('goalContribution', data)} onEditRecurring={(data) => onEditRecurring('goalContribution', data)} onDeleteRecurring={(id) => onDeleteRecurring('goalContribution', id)} isGlobal={false} />
+                    {Object.keys(autoAllocations || {}).length > 0 && (
+                        <div className="p-3 border-t border-slate-100 bg-indigo-50/30">
+                            <div className="text-[10px] font-bold text-slate-400 uppercase mb-2">Auto-Allocations</div>
+                            {Object.entries(autoAllocations).map(([gId, amt]) => {
+                                const g = availableGoals.find(x => x.id === gId);
+                                return (<div key={gId} className="flex justify-between text-xs text-slate-600 mb-1"><span>{g?.name}</span><span className="font-mono font-bold text-indigo-600">{formatCHF(amt)}</span></div>);
+                            })}
+                        </div>
+                    )}
+                    </div>
+                </div>
+             </div>
+          )}
+          {showSmartEntry && <SmartEntryModal onClose={() => setShowSmartEntry(false)} onSave={handleSmartEntrySave} />}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// 7. Main App
+export default function App() {
+  const [scenarios, setScenarios] = useState(defaultScenarios);
+  const [activeScenarioId, setActiveScenarioId] = useState(defaultScenarios[0].id);
+  const [editingGoalId, setEditingGoalId] = useState(null);
+  const [isCreatingGoal, setIsCreatingGoal] = useState(false);
+  const [showCivilServiceModal, setShowCivilServiceModal] = useState(false);
+  const [showAIAdvisor, setShowAIAdvisor] = useState(false);
+  const [showDataTransfer, setShowDataTransfer] = useState(false);
+  const [transferMode, setTransferMode] = useState('export-json');
+  const [showRenameModal, setShowRenameModal] = useState(false);
+
+  const activeScenario = useMemo(() => 
+    scenarios.find(s => s.id === activeScenarioId), 
+    [scenarios, activeScenarioId]
+  );
+
+  const stats = useMemo(() => {
+    if (!activeScenario) return { chartData: [], goalCalculations: {}, goalStatus: {}, goalInsights: {}, requiredIncomePerMonth: [], monthlyAutoAllocations: [] };
+    
+    // Base globals
+    const baseGlobalIncome = sumItems(activeScenario.globalIncomes);
+    const baseGlobalExpense = sumItems(activeScenario.globalExpenses);
+    
+    // 1. Calculate Income Stream (Projected)
+    const rawIncomePerMonth = activeScenario.months.map(m => {
+       const globalForMonth = calculateGlobalTotal(activeScenario.globalIncomes, m.globalOverrides);
+       const recInc = sumItems(calculateRecurringForMonth(m.index, activeScenario.recurringIncomes).map(i => ({ amount: i.computedAmount })));
+       return globalForMonth + sumItems(m.specificIncomes) + recInc;
+    });
+
+    // 2. Civil Service Adjustment
+    const adjustedIncomePerMonth = [...rawIncomePerMonth];
+    const cs = activeScenario.civilService;
+
+    if (cs && cs.active) {
+      let sumPrev = 0;
+      let count = 0;
+      for (let i = 1; i <= 6; i++) {
+        const targetIndex = cs.startMonthIndex - i;
+        if (targetIndex >= 0) {
+          sumPrev += rawIncomePerMonth[targetIndex];
+          count++;
+        } else {
+          sumPrev += baseGlobalIncome; 
+          count++;
+        }
+      }
+      const avgIncome = count > 0 ? sumPrev / count : baseGlobalIncome;
+      const reducedIncome = avgIncome * 0.8;
+
+      for (let i = 0; i < cs.durationMonths; i++) {
+        const idx = cs.startMonthIndex + i;
+        if (idx < adjustedIncomePerMonth.length) {
+          adjustedIncomePerMonth[idx] = reducedIncome; 
+        }
+      }
+    }
+
+    // NEW: Calculate Average Monthly Expenses for "Multiplier" Goals
+    const expensePerMonth = activeScenario.months.map(m => {
+       const globalForMonth = calculateGlobalTotal(activeScenario.globalExpenses, m.globalOverrides);
+       const recExp = sumItems(calculateRecurringForMonth(m.index, activeScenario.recurringExpenses).map(x => ({ amount: x.computedAmount })));
+       return globalForMonth + sumItems(m.specificExpenses) + recExp;
+    });
+    const avgMonthlyExpense = expensePerMonth.reduce((a,b)=>a+b,0) / (expensePerMonth.length || 1);
+
+    // 3. Goal Calcs
+    const goalCalculations = {};
+    activeScenario.savingsGoals?.forEach(g => {
+      let calculatedTarget = 0;
+      if (g.targetType === 'percent') {
+         for(let i = 0; i <= Math.min(g.deadlineMonthIndex, activeScenario.months.length - 1); i++) {
+            calculatedTarget += adjustedIncomePerMonth[i];
+         }
+         calculatedTarget = calculatedTarget * (g.targetValue / 100);
+      } else if (g.targetType === 'multiplier') {
+         calculatedTarget = avgMonthlyExpense * (g.targetValue || 0);
+      } else {
+         calculatedTarget = g.targetValue || 0; 
+      }
+      goalCalculations[g.id] = { calculatedTarget };
+    });
+
+    // 4. Reverse Calc Needs
+    const goalMonthlyNeeds = activeScenario.savingsGoals?.map(g => {
+       const target = goalCalculations[g.id].calculatedTarget;
+       if (target === 0 && !g.targetValue) {
+          if (g.allocationType === 'percent') return { id: g.id, monthlyNeed: 0, deadline: 999 }; 
+          return { id: g.id, monthlyNeed: g.allocationValue, deadline: 999 };
+       }
+       const start = g.currentBalance || 0;
+       const needed = Math.max(0, target - start);
+       const duration = g.deadlineMonthIndex + 1; 
+       return { 
+         id: g.id, 
+         monthlyNeed: duration > 0 ? needed / duration : 0, 
+         deadline: g.deadlineMonthIndex 
+       };
+    });
+
+    const requiredIncomePerMonth = activeScenario.months.map((m, i) => {
+        const globalExp = calculateGlobalTotal(activeScenario.globalExpenses, m.globalOverrides);
+        const recExp = sumItems(calculateRecurringForMonth(m.index, activeScenario.recurringExpenses).map(x => ({ amount: x.computedAmount })));
+        const totalExp = globalExp + sumItems(m.specificExpenses) + recExp;
+        const totalGoalNeed = goalMonthlyNeeds.reduce((sum, g) => {
+           return i <= g.deadline ? sum + g.monthlyNeed : sum;
+        }, 0);
+        return totalExp + totalGoalNeed;
+    });
+
+    // 5. Chart Data (Main Simulation Loop)
+    let mainBalance = 0;
+    // Goal Balances are tracked per month. We start with initial.
+    let currentGoalBalances = {};
+    activeScenario.savingsGoals?.forEach(g => {
+      currentGoalBalances[g.id] = g.currentBalance || 0;
+    });
+
+    const goalStatus = {};
+    const monthlyAutoAllocations = []; // Array of { [goalId]: amount }
+    // New: Current Month Index Logic
+    const today = new Date();
+    let currentMonthDisplayIndex = 0;
+
+    const chartData = activeScenario.months.map((m, i) => {
+      const currentMonthAutoAlloc = {};
+      const mDate = new Date(m.date);
+      if (mDate.getMonth() === today.getMonth() && mDate.getFullYear() === today.getFullYear()) {
+          currentMonthDisplayIndex = i;
+      }
+      
+      // If This month is ACTUAL
+      if (m.isActual) {
+         mainBalance = m.actualMainBalance;
+         // Reset goal balances to actuals
+         activeScenario.savingsGoals?.forEach(g => {
+             if (m.actualGoalBalances && m.actualGoalBalances[g.id] !== undefined) {
+                 currentGoalBalances[g.id] = m.actualGoalBalances[g.id];
+             }
+             // FIX: Calculate display-only auto-alloc for actual months too
+             if (g.autoAdjust && g.targetValue) {
+                 const target = goalCalculations[g.id].calculatedTarget;
+                 const current = currentGoalBalances[g.id];
+                 const monthsLeft = g.deadlineMonthIndex - m.index + 1;
+                 let contribution = 0;
+                 // Only allocate if needed (target not met or continue enabled)
+                 const isTargetReached = current >= target;
+                 if (monthsLeft > 0 && (!isTargetReached || g.continueAfterGoal)) {
+                   if (!isTargetReached) {
+                      contribution = Math.max(0, (target - current) / monthsLeft);
+                   }
+                 }
+                 currentMonthAutoAlloc[g.id] = contribution;
+             }
+         });
+         
+         monthlyAutoAllocations.push(currentMonthAutoAlloc); 
+         // FIX: Capture Goal Status even in actual months
+         activeScenario.savingsGoals?.forEach(g => {
+            if (m.index === g.deadlineMonthIndex) {
+                 goalStatus[g.id] = { 
+                     projectedBalance: currentGoalBalances[g.id],
+                     deadlineLabel: m.name
+                 };
+            }
+         });
+
+         return {
+             fullName: m.fullName,
+             mainBalance,
+             goalBalances: { ...currentGoalBalances }
+         };
+      }
+
+      // --- PROJECTED LOGIC ---
+      const globalExp = calculateGlobalTotal(activeScenario.globalExpenses, m.globalOverrides);
+      const recExp = sumItems(calculateRecurringForMonth(m.index, activeScenario.recurringExpenses).map(x => ({ amount: x.computedAmount })));
+      
+      const income = adjustedIncomePerMonth[i]; 
+      const expense = globalExp + sumItems(m.specificExpenses) + recExp;
+      
+      // 1. Update Main Balance with basic flow first (Income - Expenses)
+      let availableBalance = mainBalance + income - expense; 
+      
+      // 2. Process Goals by Priority (Waterfall)
+      let totalAllocated = 0;
+      
+      // Helper to calculate ideal contribution based on settings
+      const calculateIdealContribution = (g) => {
+          const target = goalCalculations[g.id].calculatedTarget;
+          const current = currentGoalBalances[g.id];
+          const isTargetReached = g.targetValue && current >= target;
+          const startMonth = g.startMonthIndex || 0;
+          const shouldStop = isTargetReached && !g.continueAfterGoal && !g.autoAdjust;
+
+          if (!shouldStop && m.index >= startMonth && (m.index <= g.deadlineMonthIndex || (!g.targetValue && g.targetType !== 'percent' && g.targetType !== 'multiplier') || g.continueAfterGoal)) {
+              if (g.autoAdjust && g.targetValue) {
+                  const monthsLeft = g.deadlineMonthIndex - m.index + 1;
+                  if (monthsLeft > 0) return Math.max(0, (target - current) / monthsLeft);
+                  return 0;
+              } else if (g.allocationType === 'percent') {
+                  return income * (g.allocationValue / 100);
+              } else {
+                  return g.allocationValue;
+              }
+          }
+          return 0;
+      };
+
+      // Loop priorities 1 to 3
+      [1, 2, 3].forEach(priority => {
+          activeScenario.savingsGoals?.forEach(g => {
+            // Default priority is 1 if undefined (migration)
+            const gPriority = g.priority || 1;
+            
+            if (gPriority === priority) {
+                let ideal = calculateIdealContribution(g);
+                let actual = ideal;
+
+                // WATERFALL LOGIC
+                if (!g.forceAllocation) {
+                    // Only allocate if there is money available in Main Balance
+                    if (availableBalance > 0) {
+                        actual = Math.min(ideal, availableBalance);
+                    } else {
+                        actual = 0;
+                    }
+                }
+                
+                // Cap at target if strict target logic
+                if (g.targetValue && !g.continueAfterGoal && !g.autoAdjust) {
+                    const target = goalCalculations[g.id].calculatedTarget;
+                    const current = currentGoalBalances[g.id];
+                    actual = Math.min(actual, Math.max(0, target - current));
+                }
+
+                totalAllocated += actual;
+                currentGoalBalances[g.id] += actual;
+                availableBalance -= actual; // Deduct from main balance pool for next priorities
+
+                // Store for display
+                if (g.autoAdjust || g.isSecondPriority || g.priority > 1) {
+                    currentMonthAutoAlloc[g.id] = actual; 
+                }
+            }
+          });
+      });
+      monthlyAutoAllocations.push(currentMonthAutoAlloc);
+
+      const recContribs = calculateRecurringForMonth(m.index, activeScenario.recurringGoalContributions || []);
+      recContribs.forEach(c => {
+         totalAllocated += c.computedAmount;
+         availableBalance -= c.computedAmount;
+         if (currentGoalBalances[c.goalId] !== undefined) currentGoalBalances[c.goalId] += c.computedAmount;
+      });
+
+      m.specificGoalContributions?.forEach(c => {
+         const amt = parseFloat(c.amount) || 0;
+         totalAllocated += amt;
+         availableBalance -= amt;
+         if (currentGoalBalances[c.goalId] !== undefined) currentGoalBalances[c.goalId] += amt;
+      });
+
+      // Final Balance Update
+      mainBalance = availableBalance; 
+
+      // Capture Status
+      activeScenario.savingsGoals?.forEach(g => {
+        if (m.index === g.deadlineMonthIndex) goalStatus[g.id] = { projectedBalance: currentGoalBalances[g.id], deadlineLabel: m.name };
+      });
+
+      return { fullName: m.fullName, mainBalance, goalBalances: { ...currentGoalBalances } };
+    });
+
+    const goalInsights = {};
+    activeScenario.savingsGoals?.forEach(g => {
+        const target = goalCalculations[g.id]?.calculatedTarget || 0;
+        const startBal = g.currentBalance || 0;
+        const monthsToDeadline = g.deadlineMonthIndex + 1; 
+        const needed = Math.max(0, target - startBal);
+        const idealMonthly = monthsToDeadline > 0 ? needed / monthsToDeadline : 0;
+        let hitMonthIndex = -1;
+        
+        if (target > 0) {
+          for (let i = 0; i < chartData.length; i++) {
+              if (chartData[i].goalBalances[g.id] >= target) {
+                  hitMonthIndex = i;
+                  break;
+              }
+          }
+        }
+        
+        goalInsights[g.id] = {
+            idealMonthly,
+            hitMonthIndex,
+            hitMonthName: hitMonthIndex !== -1 ? activeScenario.months[hitMonthIndex].fullName : null,
+            isHitWithinProjection: hitMonthIndex !== -1
+        };
+    });
+
+    return { chartData, goalCalculations, goalStatus, goalInsights, requiredIncomePerMonth, adjustedIncomePerMonth, monthlyAutoAllocations, currentMonthDisplayIndex };
+  }, [activeScenario]);
+
+  // Actions
+  const handleCreateScenario = () => {
+    const newScenario = JSON.parse(JSON.stringify(activeScenario));
+    newScenario.id = uid();
+    newScenario.name = `${activeScenario.name} (Copy)`;
+    newScenario.months = newScenario.months.map(m => ({ ...m, date: new Date(m.date) }));
+    setScenarios([...scenarios, newScenario]);
+    setActiveScenarioId(newScenario.id);
+  };
+  const handleDeleteScenario = (id) => {
+    if (scenarios.length === 1) return;
+    const newScenarios = scenarios.filter(s => s.id !== id);
+    setScenarios(newScenarios);
+    if (activeScenarioId === id) setActiveScenarioId(newScenarios[0].id);
+  };
+  const updateActiveScenario = (field, value) => {
+    const updated = { ...activeScenario, [field]: value };
+    setScenarios(scenarios.map(s => s.id === activeScenarioId ? updated : s));
+  };
+  const handleUpdateMonth = (updatedMonth) => {
+    const updatedMonths = activeScenario.months.map(m => m.id === updatedMonth.id ? updatedMonth : m);
+    updateActiveScenario('months', updatedMonths);
+  };
+  const handleAddRecurring = (monthIndex, type, data) => {
+    let key = type === 'income' ? 'recurringIncomes' : type === 'expense' ? 'recurringExpenses' : 'recurringGoalContributions';
+    const newItem = { ...data, startMonthIndex: monthIndex };
+    updateActiveScenario(key, [...(activeScenario[key] || []), newItem]);
+  };
+  const handleEditRecurring = (type, data) => {
+    let key = type === 'income' ? 'recurringIncomes' : type === 'expense' ? 'recurringExpenses' : 'recurringGoalContributions';
+    const updated = (activeScenario[key] || []).map(i => i.id === data.id ? data : i);
+    updateActiveScenario(key, updated);
+  };
+  const handleDeleteRecurring = (type, id) => {
+    let key = type === 'income' ? 'recurringIncomes' : type === 'expense' ? 'recurringExpenses' : 'recurringGoalContributions';
+    const filtered = (activeScenario[key] || []).filter(i => i.id !== id);
+    updateActiveScenario(key, filtered);
+  };
+  const handleSaveGoal = (goalData) => {
+    const goals = activeScenario.savingsGoals || [];
+    const existingIndex = goals.findIndex(g => g.id === goalData.id);
+    let newGoals = existingIndex >= 0 ? [...goals] : [...goals, goalData];
+    if (existingIndex >= 0) newGoals[existingIndex] = goalData;
+    updateActiveScenario('savingsGoals', newGoals);
+    setEditingGoalId(null);
+    setIsCreatingGoal(false);
+  };
+  const handleDeleteGoal = (id) => {
+    updateActiveScenario('savingsGoals', (activeScenario.savingsGoals || []).filter(g => g.id !== id));
+  };
+
+  const handleAIAction = (actions) => {
+    let newScenario = { ...activeScenario };
+    let shouldCreateNew = false;
+    let newName = newScenario.name;
+
+    actions.forEach(action => {
+        if (action.type === 'CREATE_PLAN') {
+            shouldCreateNew = true;
+            newName = action.name || "✨ AI Optimized Plan";
+        }
+    });
+
+    if (shouldCreateNew || (activeScenario.name !== "✨ AI Optimized Plan" && actions.length > 0)) {
+         const copy = JSON.parse(JSON.stringify(activeScenario));
+         copy.id = uid();
+         copy.name = newName;
+         copy.months = copy.months.map(m => ({ ...m, date: new Date(m.date) }));
+         newScenario = copy;
+         setScenarios(prev => [...prev, newScenario]);
+         setActiveScenarioId(newScenario.id);
+    }
+
+    actions.forEach(action => {
+        if (action.type === 'ADD_EXPENSE') {
+            const newExp = { id: uid(), name: action.name, amount: action.amount };
+            newScenario.globalExpenses = [...newScenario.globalExpenses, newExp];
+        } 
+        else if (action.type === 'UPDATE_EXPENSE') {
+            newScenario.globalExpenses = newScenario.globalExpenses.map(e => 
+                e.id === action.id ? { ...e, amount: action.amount } : e
+            );
+        }
+        else if (action.type === 'ADD_GOAL') {
+             const newGoal = {
+                id: uid(),
+                name: action.name,
+                targetType: 'fixed',
+                targetValue: action.target,
+                allocationType: 'fixed',
+                allocationValue: action.allocation,
+                currentBalance: 0,
+                deadlineMonthIndex: action.deadlineMonth || 12,
+                autoAdjust: false
+             };
+             newScenario.savingsGoals = [...newScenario.savingsGoals, newGoal];
+        }
+        else if (action.type === 'UPDATE_GOAL') {
+             newScenario.savingsGoals = newScenario.savingsGoals.map(g => 
+                g.id === action.id ? { ...g, targetValue: action.target, allocationValue: action.allocation } : g
+             );
+        }
+    });
+
+    setScenarios(prev => prev.map(s => s.id === newScenario.id ? newScenario : s));
+  };
+
+  const openDataTransfer = (mode) => {
+    setTransferMode(mode);
+    setShowDataTransfer(true);
+  };
+
+  const handleImportData = (json) => {
+    let dataToImport = json;
+    
+    if (!Array.isArray(json)) {
+       dataToImport = [json];
+    }
+    
+    if (!dataToImport[0] || !dataToImport[0].id || !dataToImport[0].months) {
+       alert("Invalid file structure. Please upload a valid FinVision export file.");
+       return;
+    }
+
+    try {
+        const revived = dataToImport.map(s => ({
+            ...s,
+            months: s.months.map(m => ({
+                ...m,
+                date: new Date(m.date) 
+            }))
+        }));
+        setScenarios(revived);
+        setActiveScenarioId(revived[0].id);
+        alert("Database imported successfully!");
+    } catch (e) {
+        console.error("Import Error", e);
+        alert("Error importing data. The file might be corrupted.");
+    }
+  };
+
+  const handleRenameScenario = (newName) => {
+    updateActiveScenario('name', newName);
+  };
+
+  const handleAddPastMonth = () => {
+    const newScenario = JSON.parse(JSON.stringify(activeScenario));
+    
+    // 1. Calculate date for the new past month
+    const firstMonth = newScenario.months[0];
+    const prevDate = new Date(firstMonth.date);
+    prevDate.setMonth(prevDate.getMonth() - 1);
+    
+    // 2. Create the new month
+    const newMonth = {
+      id: uid(),
+      index: 0, // Will be corrected in re-index
+      date: prevDate, 
+      name: prevDate.toLocaleString('de-CH', { month: 'short', year: '2-digit' }),
+      fullName: prevDate.toLocaleString('de-CH', { month: 'long', year: 'numeric' }),
+      specificIncomes: [], 
+      specificExpenses: [], 
+      specificGoalContributions: [],
+      isActual: true, // Default to actuals for past months
+      actualIncome: 0,
+      actualExpense: 0,
+      actualMainBalance: 0,
+      actualGoalBalances: {},
+      globalOverrides: {} 
+    };
+
+    // 3. Add to array
+    newScenario.months.unshift(newMonth);
+
+    // 4. Re-index months and shift rules
+    newScenario.months.forEach((m, i) => {
+        m.index = i;
+        m.date = new Date(m.date);
+    });
+    
+    // Helper to shift
+    const shift = (items) => {
+        items.forEach(item => {
+            if (item.startMonthIndex !== undefined) item.startMonthIndex++;
+            if (item.endMonthIndex !== undefined && item.endMonthIndex !== null) item.endMonthIndex++;
+            if (item.deadlineMonthIndex !== undefined) item.deadlineMonthIndex++;
+        });
+    };
+
+    shift(newScenario.recurringIncomes);
+    shift(newScenario.recurringExpenses);
+    shift(newScenario.recurringGoalContributions);
+    shift(newScenario.savingsGoals);
+    
+    if (newScenario.civilService && newScenario.civilService.active) {
+        newScenario.civilService.startMonthIndex++;
+    }
+
+    setScenarios(scenarios.map(s => s.id === activeScenarioId ? newScenario : s));
+  };
+
+
+  return (
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-900 pb-20">
+      <header className="bg-slate-900 text-white pt-6 pb-24 px-4 sm:px-6 shadow-2xl">
+        <div className="max-w-6xl mx-auto">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+            <h1 className="text-2xl font-bold flex items-center gap-2"><PieChart className="text-indigo-400" />FinVision <span className="text-slate-500 text-sm font-normal">Scenario Planner</span></h1>
+            <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+              <button onClick={() => setShowAIAdvisor(true)} className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-bold bg-gradient-to-r from-purple-500 to-indigo-600 text-white shadow-lg hover:shadow-indigo-500/50 transition-all"><Sparkles className="w-4 h-4" /> AI Advisor</button>
+              <div className="w-px h-6 bg-slate-700 mx-2 hidden sm:block"></div>
+              <button onClick={() => setShowCivilServiceModal(true)} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors ${activeScenario.civilService?.active ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}><Briefcase className="w-4 h-4" />{activeScenario.civilService?.active ? 'Civil Service Active' : 'Plan Civil Service'}</button>
+              
+              <div className="flex items-center gap-1 bg-slate-800 p-1 rounded-lg shadow-inner ml-2">
+                <button onClick={() => openDataTransfer('export-json')} className="p-1.5 hover:bg-indigo-600 rounded text-slate-300 hover:text-white transition-colors" title="Export Database (JSON)"><Download className="w-4 h-4" /></button>
+                <button onClick={() => openDataTransfer('import')} className="p-1.5 hover:bg-indigo-600 rounded text-slate-300 hover:text-white transition-colors" title="Import Database"><Upload className="w-4 h-4" /></button>
+                <div className="w-px h-4 bg-slate-700 mx-1"></div>
+                <button onClick={() => openDataTransfer('export-csv')} className="p-1.5 hover:bg-emerald-600 rounded text-slate-300 hover:text-white transition-colors" title="Export Projection (CSV)"><FileText className="w-4 h-4" /></button>
+              </div>
+
+              <div className="flex items-center gap-2 bg-slate-800 p-1 rounded-lg shadow-inner ml-2">
+                <div className="flex items-center">
+                    <select value={activeScenarioId} onChange={(e) => setActiveScenarioId(e.target.value)} className="bg-transparent text-sm font-medium text-white outline-none px-3 py-1 cursor-pointer hover:bg-slate-700 rounded transition-colors">{scenarios.map(s => <option key={s.id} value={s.id} className="text-slate-900">{s.name}</option>)}</select>
+                    <button onClick={() => setShowRenameModal(true)} className="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded"><Edit2 className="w-3 h-3" /></button>
+                </div>
+                <div className="h-4 w-px bg-slate-700"></div>
+                <button onClick={handleCreateScenario} className="p-1.5 hover:bg-indigo-600 rounded text-slate-300 hover:text-white transition-colors"><Copy className="w-4 h-4" /></button>
+                {scenarios.length > 1 && (<button onClick={() => handleDeleteScenario(activeScenarioId)} className="p-1.5 hover:bg-rose-600 rounded text-slate-300 hover:text-white transition-colors"><Trash2 className="w-4 h-4" /></button>)}
+              </div>
+            </div>
+          </div>
+          <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4 mb-8 overflow-hidden">
+            <ProjectedGraph data={stats.chartData} savingsGoals={activeScenario.savingsGoals || []} goalCalculations={stats.goalCalculations} civilService={activeScenario.civilService} />
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <CategoryList title="Global Monthly Income" type="income" isGlobal={true} items={activeScenario?.globalIncomes} onUpdate={(items) => updateActiveScenario('globalIncomes', items)} />
+                <CategoryList title="Global Monthly Expenses" type="expense" isGlobal={true} items={activeScenario?.globalExpenses} onUpdate={(items) => updateActiveScenario('globalExpenses', items)} />
+              </div>
+            </div>
+            <div className="bg-slate-800 rounded-xl border border-slate-700 p-4">
+               <div className="flex justify-between items-center mb-4">
+                 <h4 className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2"><Target className="w-3 h-3" /> Funds & Goals</h4>
+                 <button onClick={() => setIsCreatingGoal(true)} className="text-xs bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 px-2 py-1 rounded transition-colors">+ New Fund</button>
+               </div>
+               <div className="space-y-3">
+                 {isCreatingGoal && <SavingsGoalForm onSave={handleSaveGoal} onCancel={() => setIsCreatingGoal(false)} months={activeScenario.months} />}
+                 {(activeScenario.savingsGoals || []).map(goal => {
+                   if (editingGoalId === goal.id) return <SavingsGoalForm key={goal.id} initialData={goal} onSave={handleSaveGoal} onCancel={() => setEditingGoalId(null)} months={activeScenario.months} />;
+                   
+                   const projected = stats.goalStatus[goal.id]?.projectedBalance || 0;
+                   const target = stats.goalCalculations[goal.id]?.calculatedTarget || 0;
+                   const diff = projected - target;
+                   const isTrack = diff >= 0; // -1 to allow for rounding errors
+                   const insight = stats.goalInsights[goal.id];
+                   const hasTarget = target > 0;
+                   const displayIdx = stats.currentMonthDisplayIndex;
+
+                   return (
+                      <div key={goal.id} className="bg-slate-900/50 p-3 rounded-lg border border-slate-700 relative overflow-hidden group">
+                        <div className="absolute top-0 right-0 flex">
+                          {goal.targetType === 'percent' && <div className="bg-indigo-600 text-white text-[9px] px-1.5 py-0.5 rounded-bl font-bold z-10 mr-0.5">TARGET %</div>}
+                          {goal.autoAdjust && <div className="bg-emerald-600 text-white text-[9px] px-1.5 py-0.5 rounded-bl font-bold z-10">AUTO</div>}
+                        </div>
+                        <div className="flex justify-between items-start mb-2">
+                          <div>
+                            <div className="text-sm font-bold text-slate-200">{goal.name}</div>
+                            {hasTarget ? (
+                                <div className="text-[10px] text-slate-400 flex items-center gap-1"><Flag className="w-3 h-3" /> Due {new Date(activeScenario.months[Math.min(goal.deadlineMonthIndex, activeScenario.months.length-1)]?.date).getFullYear() ? activeScenario.months[Math.min(goal.deadlineMonthIndex, activeScenario.months.length-1)]?.name + ' ' + new Date(activeScenario.months[Math.min(goal.deadlineMonthIndex, activeScenario.months.length-1)]?.date).getFullYear() : 'Invalid Date'}</div>
+                            ) : (
+                                <div className="text-[10px] text-slate-400 flex items-center gap-1"><Wallet className="w-3 h-3" /> Ongoing Fund</div>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1 z-20">
+                              <button onClick={() => setEditingGoalId(goal.id)} className="text-slate-600 hover:text-indigo-400 p-1"><Edit2 className="w-3 h-3" /></button>
+                              <button onClick={() => handleDeleteGoal(goal.id)} className="text-slate-600 hover:text-rose-500 p-1"><Trash2 className="w-3 h-3" /></button>
+                          </div>
+                        </div>
+                        {hasTarget && (
+                            <div className={`p-2 rounded mb-2 flex items-center justify-between ${isTrack ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-rose-500/10 border border-rose-500/20'}`}>
+                           <div className="flex items-center gap-2">
+                              {isTrack ? <CheckCircle2 className="w-4 h-4 text-emerald-500"/> : <AlertTriangle className="w-4 h-4 text-rose-500"/>}
+                              <div>
+                                <span className={`text-xs font-bold block ${isTrack ? 'text-emerald-400' : 'text-rose-400'}`}>{isTrack ? 'On Track' : 'Shortfall'}</span>
+                                <span className="text-[9px] text-slate-400 block -mt-0.5">
+                                  {insight.isHitWithinProjection ? `Hit by ${insight.hitMonthName}` : (isTrack ? 'Target Met' : 'Never hits target')}
+                                </span>
+                              </div>
+                           </div>
+                           <div className="text-right">
+                              {/* Fix: If track, show Total Projected, else Show Shortfall */}
+                              <span className={`text-xs font-mono font-bold block ${isTrack ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {isTrack 
+                                   ? formatCHF(stats.goalStatus[goal.id]?.projectedBalance || stats.chartData[stats.chartData.length-1]?.goalBalances[goal.id] || 0) 
+                                   : formatCHF(diff)
+                                }
+                              </span>
+                              <span className="text-[9px] text-slate-500 block">
+                                {isTrack ? 'projected total' : 'shortfall'}
+                              </span>
+                           </div>
+                        </div>
+                        )}
+                        <div className="flex justify-between items-end mt-1">
+                          <div className="text-xs text-slate-500">
+                             <div className="text-[10px] text-slate-400 uppercase mb-1">Current Balance</div>
+                             <div className="font-mono font-bold text-slate-200 text-sm mb-2">{formatCHF(stats.chartData[displayIdx]?.goalBalances[goal.id] || 0)}</div>
+                             
+                             {goal.autoAdjust || goal.priority > 1 ? (
+                                <div>
+                                   <span className="text-[10px] uppercase tracking-wide opacity-70">
+                                     {goal.priority > 1 ? 'Flexible Alloc' : 'Current Auto-Alloc'}
+                                   </span>
+                                   <div className="text-emerald-400 font-mono font-bold text-sm">
+                                     {formatCHF(stats.monthlyAutoAllocations[displayIdx]?.[goal.id] || 0)}<span className="text-[10px] font-normal text-slate-500">/mo</span>
+                                   </div>
+                                </div>
+                             ) : (
+                                <span>Allocating <span className="text-slate-300 font-mono">{goal.allocationType === 'percent' ? `${goal.allocationValue}%` : formatCHF(goal.allocationValue)}</span></span>
+                             )}
+                             {hasTarget && !goal.autoAdjust && <div className="text-[9px] text-indigo-400 mt-0.5 flex items-center gap-1">Ideal: {formatCHF(insight.idealMonthly)}/mo</div>}
+                          </div>
+                          <div className="text-right">
+                            {hasTarget ? (
+                                <>
+                                    <div className="text-[10px] text-slate-500">{goal.targetType === 'percent' ? `Target (${goal.targetValue}%)` : goal.targetType === 'multiplier' ? `Target (${goal.targetValue}x Exp)` : 'Target'}</div>
+                                    <div className="text-sm font-mono text-slate-300">{formatCHF(target)}</div>
+                                </>
+                            ) : (
+                                <div className="text-[10px] text-slate-500 italic">No Target</div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                   );
+                 })}
+               </div>
+            </div>
+          </div>
+        </div>
+      </header>
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 -mt-12 relative z-10">
+        <div className="flex justify-between items-end mb-4 px-2">
+          <div><h2 className="text-xl font-bold text-slate-800">Monthly Timeline</h2><p className="text-sm text-slate-500">Sales targets vs Expenses</p></div>
+          <button 
+             onClick={handleAddPastMonth}
+             className="text-xs bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 px-3 py-1.5 rounded-lg flex items-center gap-2 font-medium transition-colors shadow-sm"
+          >
+             <History className="w-4 h-4 text-indigo-500"/> Add Past Month
+          </button>
+        </div>
+        <div className="space-y-3">
+          {activeScenario?.months.map((month, idx) => {
+            const isCivilService = activeScenario.civilService?.active && idx >= activeScenario.civilService.startMonthIndex && idx < (activeScenario.civilService.startMonthIndex + activeScenario.civilService.durationMonths);
+            return (
+              <MonthCard 
+                key={month.id} 
+                month={month} 
+                monthsList={activeScenario.months}
+                availableGoals={activeScenario.savingsGoals}
+                globalIncomes={activeScenario.globalIncomes}
+                globalExpenses={activeScenario.globalExpenses}
+                recurringIncomes={activeScenario.recurringIncomes}
+                recurringExpenses={activeScenario.recurringExpenses}
+                recurringGoalContributions={activeScenario.recurringGoalContributions}
+                onUpdate={handleUpdateMonth} 
+                onAddRecurring={(type, data) => handleAddRecurring(month.index, type, data)}
+                onEditRecurring={handleEditRecurring}
+                onDeleteRecurring={handleDeleteRecurring}
+                requiredIncome={stats.requiredIncomePerMonth[idx]}
+                isCivilService={isCivilService}
+                civilServiceIncome={stats.adjustedIncomePerMonth[idx]}
+                autoAllocations={stats.monthlyAutoAllocations[idx]}
+              />
+            );
+          })}
+        </div>
+        <div className="mt-12 text-center text-slate-400 text-sm pb-12">Viewing projections in <span className="font-bold text-slate-500">CHF</span>.</div>
+      </main>
+      {showCivilServiceModal && <CivilServiceModal settings={activeScenario.civilService} monthsList={activeScenario.months} onClose={() => setShowCivilServiceModal(false)} onSave={(newSettings) => updateActiveScenario('civilService', newSettings)} />}
+      {showAIAdvisor && <AIAdvisorModal onClose={() => setShowAIAdvisor(false)} scenario={activeScenario} stats={stats} onAIAction={handleAIAction} />}
+      {showDataTransfer && <DataTransferModal isOpen={showDataTransfer} onClose={() => setShowDataTransfer(false)} initialMode={transferMode} scenario={activeScenario} chartData={stats.chartData} onImport={handleImportData} />}
+      {showRenameModal && <RenameScenarioModal currentName={activeScenario.name} onClose={() => setShowRenameModal(false)} onSave={handleRenameScenario} />}
+    </div>
+  );
+}
